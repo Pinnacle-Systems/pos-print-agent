@@ -1,16 +1,21 @@
 import express, { type Express } from "express";
-import type { AppConfig } from "./config/config.schema";
+import { getConfig } from "./config/config.service";
 import { errorHandler } from "./errors/error-handler";
+import { createConfigRouter } from "./routes/config.routes";
 import { createHealthRouter } from "./routes/health.routes";
+import { createPrintersRouter } from "./routes/printers.routes";
+import { createSetupRouter } from "./routes/setup.routes";
+import { createTestPrintRouter } from "./routes/test-print.routes";
 
-export function createServer(config: AppConfig): Express {
+export function createServer(): Express {
   const app = express();
 
   app.use(express.json());
 
   app.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (origin && config.allowedOrigins.includes(origin)) {
+    const { allowedOrigins } = getConfig();
+    if (origin && allowedOrigins.includes(origin)) {
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
       res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -22,7 +27,11 @@ export function createServer(config: AppConfig): Express {
     next();
   });
 
-  app.use(createHealthRouter(() => config));
+  app.use(createHealthRouter());
+  app.use(createPrintersRouter());
+  app.use(createConfigRouter());
+  app.use(createSetupRouter());
+  app.use(createTestPrintRouter());
 
   app.use(errorHandler);
 

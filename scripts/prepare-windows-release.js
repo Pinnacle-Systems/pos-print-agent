@@ -5,9 +5,11 @@ const path = require("node:path");
 
 const ROOT_DIR = path.resolve(__dirname, "..");
 const DEPLOYMENT_DIR = path.join(ROOT_DIR, "deployment", "windows-service");
+const SETUP_UI_SRC_DIR = path.join(ROOT_DIR, "src", "setup-ui");
 const RELEASE_DIR = path.join(ROOT_DIR, "release", "PosPrintAgent");
 const EXE_PATH = path.join(RELEASE_DIR, "PosPrintAgent.exe");
 const WINSW_EXE_PATH = path.join(RELEASE_DIR, "PosPrintAgentService.exe");
+const SETUP_UI_DEST_DIR = path.join(RELEASE_DIR, "setup-ui");
 
 const SERVICE_FILES = [
   "PosPrintAgentService.xml",
@@ -16,11 +18,6 @@ const SERVICE_FILES = [
   "start-service.bat",
   "stop-service.bat",
 ];
-
-// Static/setup assets are optional today (the agent has no bundled UI yet),
-// but if a future `/setup` page ships static files from one of these
-// folders, this copies them into the release folder automatically.
-const OPTIONAL_ASSET_DIRS = ["public", "static"];
 
 const RELEASE_README = `# Pinnacle POS Print Agent - Install Guide
 
@@ -75,7 +72,9 @@ Use this to configure printer mappings for this counter.
 
 1. Stop the service (\`stop-service.bat\`).
 2. Replace \`PosPrintAgent.exe\` in this folder with the new build.
-3. Start the service again (\`start-service.bat\`).
+3. Replace the \`setup-ui\` folder with the new one (it holds the setup
+   page's HTML/CSS/JS and must sit next to \`PosPrintAgent.exe\`).
+4. Start the service again (\`start-service.bat\`).
 
 Printer mappings and other settings are not affected by an upgrade.
 
@@ -107,14 +106,17 @@ function copyServiceFiles() {
   }
 }
 
-function copyOptionalAssets() {
-  for (const dir of OPTIONAL_ASSET_DIRS) {
-    const src = path.join(ROOT_DIR, dir);
-    if (fs.existsSync(src)) {
-      fs.cpSync(src, path.join(RELEASE_DIR, dir), { recursive: true });
-      console.log(`Copied static assets from ${dir}/`);
-    }
+// The setup page (GET /setup) is served from plain static files rather than
+// bundled into the pkg snapshot. pkg's virtual snapshot filesystem is not a
+// reliable place to serve static assets from, so instead these files are
+// copied beside PosPrintAgent.exe and read from real disk at runtime (see
+// resolveSetupUiDir() in src/routes/setup.routes.ts).
+function copySetupUiAssets() {
+  if (!fs.existsSync(SETUP_UI_SRC_DIR)) {
+    throw new Error(`Missing setup UI source directory: ${SETUP_UI_SRC_DIR}`);
   }
+  fs.cpSync(SETUP_UI_SRC_DIR, SETUP_UI_DEST_DIR, { recursive: true });
+  console.log("Copied setup UI assets to setup-ui/");
 }
 
 function writeReleaseReadme() {
@@ -125,7 +127,7 @@ function writeReleaseReadme() {
 function main() {
   ensureReleaseDir();
   copyServiceFiles();
-  copyOptionalAssets();
+  copySetupUiAssets();
   writeReleaseReadme();
 
   const hasExe = fs.existsSync(EXE_PATH);

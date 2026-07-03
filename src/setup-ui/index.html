@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pinnacle POS Print Agent - Setup</title>
+  <link rel="stylesheet" href="setup.css" />
+</head>
+<body>
+  <header class="page-header">
+    <h1>Pinnacle POS Print Agent</h1>
+    <p class="subtitle">Local printer setup for this counter machine</p>
+  </header>
+
+  <main>
+    <div id="message-banner" class="banner hidden" role="status"></div>
+
+    <section class="card" id="status-card">
+      <h2>Agent Status</h2>
+      <dl class="status-grid">
+        <dt>Status</dt>
+        <dd id="status-value">Loading&hellip;</dd>
+
+        <dt>Version</dt>
+        <dd id="status-version">-</dd>
+
+        <dt>Machine Name</dt>
+        <dd id="status-machine-name">-</dd>
+
+        <dt>Configured</dt>
+        <dd id="status-configured">-</dd>
+      </dl>
+    </section>
+
+    <section class="card">
+      <h2>Machine Code</h2>
+      <div class="field">
+        <label for="machine-code">Machine Code</label>
+        <input type="text" id="machine-code" readonly />
+        <p class="field-hint">
+          Machine code is read from config.json on this machine. It cannot
+          be changed from this page yet.
+        </p>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-header-row">
+        <h2>Printers</h2>
+        <button type="button" id="refresh-printers-btn" class="btn btn-secondary">
+          Refresh Printer List
+        </button>
+      </div>
+      <p class="field-hint" id="printers-loaded-hint"></p>
+
+      <form id="printer-config-form">
+        <fieldset class="role-fieldset">
+          <legend>Receipt Printer</legend>
+
+          <div class="field">
+            <label for="receipt-printer">Receipt Printer</label>
+            <select id="receipt-printer"></select>
+            <p class="field-warning hidden" id="receipt-printer-warning"></p>
+          </div>
+
+          <div class="field">
+            <label for="receipt-paper-width">Receipt Paper Width</label>
+            <select id="receipt-paper-width">
+              <option value="80mm">80mm</option>
+              <option value="58mm">58mm</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="receipt-command-language">Receipt Printer Language</label>
+            <select id="receipt-command-language">
+              <option value="ESC_POS">ESC/POS</option>
+              <option value="WINDOWS_DRIVER">Windows Driver</option>
+            </select>
+          </div>
+        </fieldset>
+
+        <fieldset class="role-fieldset">
+          <legend>Barcode Label Printer</legend>
+
+          <div class="field">
+            <label for="barcode-printer">Barcode Label Printer</label>
+            <select id="barcode-printer"></select>
+            <p class="field-warning hidden" id="barcode-printer-warning"></p>
+          </div>
+
+          <div class="field field-row">
+            <div>
+              <label for="barcode-label-width">Barcode Label Size - Width (mm)</label>
+              <input type="text" id="barcode-label-width" placeholder="e.g. 50mm" />
+            </div>
+            <div>
+              <label for="barcode-label-height">Barcode Label Size - Height (mm)</label>
+              <input type="text" id="barcode-label-height" placeholder="e.g. 25mm" />
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="barcode-command-language">Barcode Printer Language</label>
+            <select id="barcode-command-language">
+              <option value="TSPL">TSPL</option>
+              <option value="ZPL">ZPL</option>
+              <option value="WINDOWS_DRIVER">Windows Driver</option>
+            </select>
+          </div>
+        </fieldset>
+
+        <fieldset class="role-fieldset">
+          <legend>A4 Invoice Printer</legend>
+
+          <div class="field">
+            <label for="a4-printer">A4 Invoice Printer</label>
+            <select id="a4-printer"></select>
+            <p class="field-warning hidden" id="a4-printer-warning"></p>
+          </div>
+
+          <div class="field">
+            <label for="a4-command-language">A4 Printer Language</label>
+            <select id="a4-command-language">
+              <option value="PDF">PDF</option>
+              <option value="WINDOWS_DRIVER">Windows Driver</option>
+            </select>
+          </div>
+        </fieldset>
+
+        <fieldset class="role-fieldset">
+          <legend>Cash Drawer</legend>
+
+          <div class="field">
+            <label for="cash-drawer-printer">Cash Drawer Printer</label>
+            <select id="cash-drawer-printer"></select>
+            <p class="field-warning hidden" id="cash-drawer-printer-warning"></p>
+          </div>
+          <p class="field-hint">
+            Cash drawers are opened through a receipt printer's kick cable
+            using the ESC/POS command language.
+          </p>
+        </fieldset>
+
+        <div class="actions">
+          <button type="submit" id="save-config-btn" class="btn btn-primary">
+            Save Configuration
+          </button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Test Printing</h2>
+      <p class="field-hint">
+        Sends a short text page to the printer mapped to that role, to
+        confirm the agent can reach it. A role must be selected and saved
+        before it can be tested. This is a connectivity check, not a real
+        receipt/label render or a cash-drawer kick — those are separate,
+        not-yet-built features.
+      </p>
+      <div class="actions">
+        <button type="button" class="btn btn-secondary test-btn" data-role="receipt">
+          Test Receipt Print
+        </button>
+        <button type="button" class="btn btn-secondary test-btn" data-role="barcode-label">
+          Test Barcode Print
+        </button>
+        <button type="button" class="btn btn-secondary test-btn" data-role="a4-invoice">
+          Test A4 Print
+        </button>
+        <button type="button" class="btn btn-secondary test-btn" data-role="cash-drawer">
+          Test Cash Drawer
+        </button>
+      </div>
+    </section>
+  </main>
+
+  <script src="setup.js"></script>
+</body>
+</html>

@@ -6,7 +6,7 @@ const HOST = "127.0.0.1";
 
 function main(): void {
   const config = loadConfig();
-  const app = createServer(config);
+  const app = createServer();
 
   app.listen(config.agentPort, HOST, () => {
     logger.info(`Pinnacle POS Print Agent listening on http://${HOST}:${config.agentPort}`);

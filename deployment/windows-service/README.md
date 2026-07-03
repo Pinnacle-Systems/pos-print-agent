@@ -28,6 +28,7 @@ Everything below must live in the **same folder** on the target machine:
 ```text
 C:\Pinnacle\PosPrintAgent\
   PosPrintAgent.exe          <- the packaged agent (built separately)
+  setup-ui\                  <- static setup page assets (served at /setup)
   PosPrintAgentService.exe   <- WinSW, renamed to this exact name
   PosPrintAgentService.xml   <- WinSW config (from this folder)
   install-service.bat
@@ -40,6 +41,10 @@ Notes:
 
 - **`PosPrintAgent.exe`**: the built print agent binary. Place it directly
   in `C:\Pinnacle\PosPrintAgent`.
+- **`setup-ui\`**: plain HTML/CSS/JS for the `/setup` page. `PosPrintAgent.exe`
+  reads these files straight off disk at runtime (they are not embedded in
+  the exe), so this folder must sit next to the exe. It is produced by
+  `npm run prepare:release` from `src/setup-ui`.
 - **`PosPrintAgentService.exe`**: download the WinSW executable from the
   [WinSW releases page](https://github.com/winsw/winsw/releases) and rename
   it to `PosPrintAgentService.exe`. WinSW automatically looks for a
@@ -98,9 +103,11 @@ http://127.0.0.1:17777/setup
    install — either way the service must not be holding the old exe open).
 2. Replace `PosPrintAgent.exe` in `C:\Pinnacle\PosPrintAgent` with the new
    build.
-3. Run `start-service.bat`.
+3. Replace the `setup-ui` folder with the new one, in case the setup page
+   changed.
+4. Run `start-service.bat`.
 
 `PosPrintAgentService.exe` and `PosPrintAgentService.xml` do not need to
-change for an agent upgrade — only the `PosPrintAgent.exe` binary is
+change for an agent upgrade — only `PosPrintAgent.exe` and `setup-ui` are
 replaced. Config under `C:\ProgramData\Pinnacle\PosPrintAgent` is untouched
 by an upgrade.

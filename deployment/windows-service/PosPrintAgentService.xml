@@ -1,0 +1,20 @@
+<service>
+  <id>PinnaclePosPrintAgent</id>
+  <name>Pinnacle POS Print Agent</name>
+  <description>Local print agent for POS receipt, barcode label and cash drawer printing.</description>
+
+  <executable>C:\Pinnacle\PosPrintAgent\PosPrintAgent.exe</executable>
+  <workingdirectory>C:\Pinnacle\PosPrintAgent</workingdirectory>
+
+  <logpath>C:\ProgramData\Pinnacle\PosPrintAgent\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10485760</sizeThreshold>
+    <keepFiles>10</keepFiles>
+  </log>
+
+  <startmode>Automatic</startmode>
+
+  <onfailure action="restart" delay="10 sec" />
+  <onfailure action="restart" delay="30 sec" />
+  <onfailure action="none" />
+</service>

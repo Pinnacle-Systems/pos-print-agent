@@ -9,7 +9,10 @@
     "build": "tsc",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest"
+    "test": "vitest",
+    "package:win": "npm run build && pkg dist/main.js --targets node22-win-x64 --output release/PosPrintAgent/PosPrintAgent.exe",
+    "prepare:release": "node scripts/prepare-windows-release.js",
+    "release:win": "npm run package:win && npm run prepare:release"
   },
   "dependencies": {
     "express": "^4.19.2",
@@ -18,6 +21,7 @@
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^20.14.0",
+    "@yao-pkg/pkg": "^6.21.0",
     "tsx": "^4.16.2",
     "typescript": "^5.5.4",
     "vitest": "^2.0.5"

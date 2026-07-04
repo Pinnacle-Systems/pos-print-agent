@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { CONFIG_FILE_PATH, DATA_ROOT, LOG_DIR_PATH } from "./config.paths";
+import { CONFIG_FILE_PATH, DATA_ROOT, LOG_DIR_PATH, TEMP_DIR_PATH } from "./config.paths";
 import { ConfigSchema, type AppConfig, type PrinterMappings } from "./config.schema";
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -17,6 +17,7 @@ let cachedConfig: AppConfig | null = null;
 export function ensureDirectories(): void {
   fs.mkdirSync(DATA_ROOT, { recursive: true });
   fs.mkdirSync(LOG_DIR_PATH, { recursive: true });
+  fs.mkdirSync(TEMP_DIR_PATH, { recursive: true });
 }
 
 export function loadConfig(): AppConfig {

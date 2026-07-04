@@ -10,6 +10,9 @@ const RELEASE_DIR = path.join(ROOT_DIR, "release", "PosPrintAgent");
 const EXE_PATH = path.join(RELEASE_DIR, "PosPrintAgent.exe");
 const WINSW_EXE_PATH = path.join(RELEASE_DIR, "PosPrintAgentService.exe");
 const SETUP_UI_DEST_DIR = path.join(RELEASE_DIR, "setup-ui");
+const SUMATRA_EXE_NAME = "SumatraPDF.exe";
+const SUMATRA_SRC_PATH = path.join(ROOT_DIR, "tools", SUMATRA_EXE_NAME);
+const SUMATRA_DEST_PATH = path.join(RELEASE_DIR, SUMATRA_EXE_NAME);
 
 const SERVICE_FILES = [
   "PosPrintAgentService.xml",
@@ -41,11 +44,18 @@ This folder must contain \`PosPrintAgentService.exe\` (WinSW) next to
 https://github.com/winsw/winsw/releases and rename it to
 \`PosPrintAgentService.exe\`.
 
-## 3. Install the service
+## 3. Make sure the PDF print tool is present (for A4 invoice printing)
+
+If this counter prints PDF invoices (\`POST /print\` with \`payloadType:
+"PDF"\`), this folder must also contain \`SumatraPDF.exe\` next to
+\`PosPrintAgent.exe\`. Without it, PDF print jobs fail with
+\`PDF_PRINT_TOOL_NOT_FOUND\`. Receipt printing (ESC/POS) does not need it.
+
+## 4. Install the service
 
 Right-click \`install-service.bat\` and choose **Run as administrator**.
 
-## 4. Verify it is running
+## 5. Verify it is running
 
 On the same machine, open in a browser:
 
@@ -55,7 +65,7 @@ http://127.0.0.1:17777/health
 
 You should see \`"status": "ok"\` in the response.
 
-## 5. Open the setup page
+## 6. Open the setup page
 
 \`\`\`text
 http://127.0.0.1:17777/setup
@@ -76,12 +86,16 @@ Use this to configure printer mappings for this counter.
    page's HTML/CSS/JS and must sit next to \`PosPrintAgent.exe\`).
 4. Start the service again (\`start-service.bat\`).
 
+\`SumatraPDF.exe\` does not need to change for an agent upgrade - it isn't
+built by this project and doesn't change between releases.
+
 Printer mappings and other settings are not affected by an upgrade.
 
 ## Where things are stored
 
 - Config: \`C:\\ProgramData\\Pinnacle\\PosPrintAgent\\config.json\`
 - Logs:   \`C:\\ProgramData\\Pinnacle\\PosPrintAgent\\logs\`
+- Temp PDF files (deleted automatically after each print job): \`C:\\ProgramData\\Pinnacle\\PosPrintAgent\\temp\`
 
 These survive both upgrades and uninstalls.
 
@@ -119,6 +133,21 @@ function copySetupUiAssets() {
   console.log("Copied setup UI assets to setup-ui/");
 }
 
+// SumatraPDF.exe is a third-party binary, not something this project builds
+// or is allowed to fetch automatically (see README "SumatraPDF requirement").
+// If a copy has been placed at tools/SumatraPDF.exe (a one-time manual step
+// per dev machine / CI image), copy it into the release folder so PDF
+// printing works out of the box; otherwise warn loudly rather than silently
+// shipping a release that can't print PDFs.
+function copySumatraPdfIfPresent() {
+  if (!fs.existsSync(SUMATRA_SRC_PATH)) {
+    return false;
+  }
+  fs.copyFileSync(SUMATRA_SRC_PATH, SUMATRA_DEST_PATH);
+  console.log(`Copied ${SUMATRA_EXE_NAME}`);
+  return true;
+}
+
 function writeReleaseReadme() {
   fs.writeFileSync(path.join(RELEASE_DIR, "README.md"), RELEASE_README, "utf8");
   console.log("Wrote README.md");
@@ -128,6 +157,7 @@ function main() {
   ensureReleaseDir();
   copyServiceFiles();
   copySetupUiAssets();
+  const hasSumatra = copySumatraPdfIfPresent() || fs.existsSync(SUMATRA_DEST_PATH);
   writeReleaseReadme();
 
   const hasExe = fs.existsSync(EXE_PATH);
@@ -147,6 +177,15 @@ function main() {
     console.log("WARNING: PosPrintAgentService.exe (WinSW) is missing from the release folder.");
     console.log("  Download it from https://github.com/winsw/winsw/releases,");
     console.log(`  rename it to PosPrintAgentService.exe, and place it in ${RELEASE_DIR}`);
+    console.log("");
+  }
+
+  if (!hasSumatra) {
+    console.log("WARNING: SumatraPDF.exe is missing from the release folder.");
+    console.log("  PDF printing (POST /print with payloadType \"PDF\") will fail with");
+    console.log("  PDF_PRINT_TOOL_NOT_FOUND until it is added.");
+    console.log(`  Place a copy at ${SUMATRA_SRC_PATH} and re-run this script,`);
+    console.log(`  or copy it directly into ${RELEASE_DIR} yourself.`);
     console.log("");
   }
 

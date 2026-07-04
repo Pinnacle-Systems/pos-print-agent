@@ -6,12 +6,15 @@ import { z } from "zod";
 // return the more specific PRINT_ROLE_NOT_IMPLEMENTED / UNSUPPORTED_PAYLOAD_TYPE
 // / UNSUPPORTED_COMMAND_LANGUAGE error codes instead of a generic schema
 // failure for values the wider system recognizes but this endpoint doesn't
-// implement yet.
+// implement yet. `payloadEncoding` is optional here for the same reason -
+// it's only meaningful (and required) for payloadType "PDF"; PRINT_INSTRUCTIONS
+// jobs don't send it at all.
 export const PrintJobRequestSchema = z.object({
   jobId: z.string().min(1, "jobId is required"),
   printRole: z.string().min(1, "printRole is required"),
   commandLanguage: z.string().min(1, "commandLanguage is required"),
   payloadType: z.string().min(1, "payloadType is required"),
+  payloadEncoding: z.string().optional(),
   copies: z
     .number()
     .int()

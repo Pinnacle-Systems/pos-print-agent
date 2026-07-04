@@ -37,15 +37,16 @@ it belongs here.
 
 The split is:
 
-- **POS/backend** owns receipt content and layout. It decides what text
-  appears, in what order, bold/aligned/sized however the business wants,
-  and reduces all of that down to a small, generic instruction list
-  (`text` / `line` / `feed` / `cut`).
-- **Local agent** (this project) owns *local* printer mapping only. It
-  takes that generic instruction list and converts it into
-  printer-specific command bytes (ESC/POS for now), then sends those bytes
-  to whichever Windows printer is mapped to that print role on this
-  counter.
+- **POS/backend** owns receipt content and layout, *and* owns final
+  document layout for A4 invoices/reports. For receipts it reduces content
+  down to a small, generic instruction list (`text` / `line` / `feed` /
+  `cut`); for A4 invoices it generates the final PDF itself.
+- **Local agent** (this project) owns *local* printer mapping only. For
+  receipts, it converts the generic instruction list into printer-specific
+  command bytes (ESC/POS for now). For A4 invoices, it takes the
+  already-finished PDF as-is and hands it to a PDF-aware print tool. Either
+  way, it sends the result to whichever Windows printer is mapped to that
+  print role on this counter — it never generates layout itself.
 
 ### Why the agent does not accept invoice JSON
 
@@ -75,7 +76,33 @@ raw command bytes directly. Two reasons:
 
 `RAW_COMMAND` is a recognized concept in the wider system's `payloadType`
 vocabulary, but it is intentionally not implemented in `POST /print` — see
-[Error Codes](#error-codes) below.
+[Error codes](#error-codes) below.
+
+### Why PDF uses a separate path from raw ESC/POS
+
+A4 invoices, delivery challans, and reports are document-style output, not
+receipt instructions, so they get a completely separate internal path:
+
+```text
+PRINT_INSTRUCTIONS → ESC/POS instruction renderer → raw print adapter → receipt printer
+PDF                → decode base64 → temp PDF file → PDF print adapter → Windows printer
+```
+
+The raw print adapter (`sendRawToPrinter()`) writes bytes straight to the
+spooler's `RAW` datatype — that's exactly right for ESC/POS/TSPL/ZPL
+command bytes, but a normal A4 printer driver does not accept raw PDF
+bytes through `WritePrinter`; PDF rendering needs a PDF-aware tool in the
+loop. So PDF printing:
+
+- Never calls `sendRawToPrinter()` or touches `raw-print.service.ts`.
+- Decodes and validates the PDF, writes it to a temp file, and hands that
+  file to SumatraPDF (see
+  [SumatraPDF requirement](#sumatrapdf-requirement)), which does the actual
+  PDF rendering and submits the print job through the normal Windows
+  driver pipeline.
+- Never generates the PDF itself — POS/backend owns invoice layout, GST,
+  tax, discounts, and item logic entirely; the agent only ever receives
+  the finished PDF bytes and sends them onward.
 
 ## Requirements
 
@@ -389,40 +416,112 @@ Errors:
 ### POST /print
 
 Accepts a generic print job — logical `printRole` + `commandLanguage` +
-a `payloadType` describing the shape of `payload` — converts it to
-printer command bytes, and sends it to the printer mapped to that role.
-This is the real print path the web POS should call for receipts; it
-supersedes `POST /test-print` (a connectivity smoke test) for actual
-production printing.
+a `payloadType` describing the shape of `payload` — resolves it to a
+physical printer locally, and sends printer-appropriate output to it. This
+is the real print path the web POS should call for production printing;
+`POST /test-print` remains a connectivity smoke test only.
 
-Currently implemented:
+Currently implemented — exactly two `printRole` / `commandLanguage` /
+`payloadType` combinations:
 
-- `printRole`: only `"receipt"`.
-- `commandLanguage`: only `"ESC_POS"`.
-- `payloadType`: only `"PRINT_INSTRUCTIONS"` — a generic, printer-agnostic
-  list of instructions (`text`, `line`, `feed`, `cut`). **`RAW_COMMAND` is
-  not accepted here** — see
-  [Why the public /print API does not accept RAW_COMMAND](#why-the-public-print-api-does-not-accept-raw_command).
+| `printRole`  | `commandLanguage` | `payloadType`       | What happens                                    |
+| ------------ | ------------------ | ------------------- | ------------------------------------------------ |
+| `receipt`    | `ESC_POS`           | `PRINT_INSTRUCTIONS`| Generic instructions rendered to ESC/POS locally |
+| `a4-invoice` | `PDF`               | `PDF`                | A caller-generated PDF sent via a PDF-aware print tool |
 
-Everything else (`barcode-label`, `a4-invoice`, `cash-drawer`, `TSPL`,
-`ZPL`, `PDF`, `WINDOWS_DRIVER`) is a recognized value elsewhere in the
-system but not implemented by this endpoint yet — see
+**`RAW_COMMAND` is never accepted here**, for either role — see
+[Why the public /print API does not accept RAW_COMMAND](#why-the-public-print-api-does-not-accept-raw_command).
+
+Everything else (`barcode-label`, `cash-drawer`, `TSPL`, `ZPL`,
+`WINDOWS_DRIVER`) is a recognized value elsewhere in the system but not
+implemented by this endpoint yet — see
 [Current limitations](#current-limitations).
 
-#### Instruction types
+#### PRINT_INSTRUCTIONS (receipt)
 
-| Type   | Fields                                                                                                   |
-| ------ | ---------------------------------------------------------------------------------------------------------------- |
-| `text` | `value` (string, ≤500 chars), `align` (`left`\|`center`\|`right`, default `left`), `bold` (default `false`), `underline` (default `false`), `size` (`normal`\|`double-width`\|`double-height`\|`double`, default `normal`) |
-| `line` | `char` (single printable character, default `-`) — repeated to `payload.width` |
-| `feed` | `lines` (1–10) |
-| `cut`  | `mode` (`full`\|`partial`, default `full`) |
+##### Instruction types
+
+| Type         | Fields                                                                                                   |
+| ------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `text`       | `value` (string, ≤500 chars), `align` (`left`\|`center`\|`right`, default `left`), `bold` (default `false`), `underline` (default `false`), `size` (`normal`\|`double-width`\|`double-height`\|`double`, default `normal`) |
+| `line`       | `char` (single printable character, default `-`) — repeated to `payload.width` |
+| `feed`       | `lines` (1–10) |
+| `cut`        | `mode` (`full`\|`partial`, default `full`) |
+| `leftRight`  | `left` (string, required, ≤250 chars), `right` (string, required, ≤100 chars), `bold`/`underline`/`size` (same defaults as `text`) |
+| `blank`      | `lines` (1–5, default `1`) |
+| `openDrawer` | no fields |
 
 `payload.width` (default `42`, must be 32–48) sets both the `line`
 character count and is otherwise informational for the caller — it does
 not currently drive text wrapping.
 
-#### Example request
+##### leftRight — totals and label/value rows
+
+`leftRight` prints one line with `left` flush against the start and
+`right` right-aligned to fill `payload.width`, so POS/backend doesn't have
+to hand-pad totals with spaces itself:
+
+```json
+{ "type": "leftRight", "left": "Grand Total", "right": "1300.00", "bold": true }
+```
+
+At `width: 42` this renders as:
+
+```text
+Grand Total                         1300.00
+```
+
+If `left` and `right` together (plus one separating space) would exceed
+`payload.width`, the renderer keeps `right` fully visible and truncates
+`left` to whatever space remains, rather than failing the print job — e.g.
+at `width: 20`, `left: "Very Long Product Name"` with
+`right: "123.00"` becomes `Very Long Pro 123.00` (19 chars: 13 truncated
+from `left`, a space, then the full `right`). See
+[`escpos-instruction.renderer.ts`](src/print-instructions/escpos-instruction.renderer.ts)'s
+`formatLeftRight()` for the exact rule, and its
+[tests](src/print-instructions/escpos-instruction.renderer.test.ts) for
+worked examples.
+
+##### blank vs feed
+
+Both add vertical space, but they mean different things:
+
+- `feed` is a printer-movement instruction — "advance the paper N lines,"
+  used mechanically (e.g. before a cut, so the cutter doesn't shear
+  printed text).
+- `blank` is a layout instruction — "leave a visible gap here," used the
+  way you'd use blank lines in a template (spacing between sections of a
+  receipt). It happens to render as the same LF bytes as `feed`, but the
+  two are named separately so POS/backend's receipt templates read as
+  intent ("blank line between header and items") rather than raw printer
+  mechanics.
+
+##### openDrawer
+
+```json
+{ "type": "openDrawer" }
+```
+
+Emits the ESC/POS cash drawer kick command (`ESC p 0 25 250` — see
+[ESC/POS drawer command limitation](#rendering-escpos) below) as part of
+the instruction sequence.
+
+**The agent never opens the drawer on its own.** A receipt does not open
+the cash drawer unless the instruction sequence explicitly includes
+`openDrawer` — POS/backend decides when that should happen (e.g. only for
+cash payments, not card), the same way it decides everything else about
+receipt content. There is currently no separate `/cash-drawer/open`
+endpoint; this instruction is the only way to open the drawer via
+`POST /print` today.
+
+**Warning:** this only sends the standard ESC/POS drawer kick command to
+whatever printer is mapped to `receipt`. Whether the drawer physically
+opens depends on it being wired into that printer's drawer-kick port and
+wanting this exact pulse timing — that still requires testing with real
+drawer hardware connected to the configured receipt printer; nothing here
+has been verified against a physical drawer.
+
+##### Example request (PRINT_INSTRUCTIONS)
 
 ```bash
 curl -X POST http://127.0.0.1:17777/print \
@@ -448,7 +547,7 @@ curl -X POST http://127.0.0.1:17777/print \
   }'
 ```
 
-#### Example response
+##### Example response (PRINT_INSTRUCTIONS)
 
 ```json
 {
@@ -463,29 +562,15 @@ curl -X POST http://127.0.0.1:17777/print \
 }
 ```
 
-#### Error codes
-
-All errors use the standard `{ success: false, errorCode, message }` shape.
-
-| Error code                       | Meaning                                                                              |
-| --------------------------------- | ------------------------------------------------------------------------------------ |
-| `INVALID_PRINT_PAYLOAD`           | Request body or `payload.instructions` shape failed validation (Zod).               |
-| `PRINT_ROLE_NOT_CONFIGURED`       | `printRole` has no saved printer mapping on this machine.                            |
-| `WINDOWS_PRINTER_NOT_FOUND`       | The mapped printer is no longer installed on this machine.                           |
-| `UNSUPPORTED_COMMAND_LANGUAGE`    | Requested `commandLanguage` doesn't match this role's configured mapping.            |
-| `UNSUPPORTED_PAYLOAD_TYPE`        | `payloadType` isn't `"PRINT_INSTRUCTIONS"` (e.g. `RAW_COMMAND`).                     |
-| `PRINT_ROLE_NOT_IMPLEMENTED`      | `printRole` is a real role but not implemented by `/print` yet (anything but `receipt`). |
-| `INSTRUCTION_TYPE_NOT_IMPLEMENTED`| An instruction's `type` isn't one of `text`/`line`/`feed`/`cut`.                     |
-| `PRINT_QUEUE_FAILED`              | Validation passed but the raw print adapter failed to deliver the rendered bytes.    |
-
 Validated in this order (see
 [`src/print-jobs/print-job.service.ts`](src/print-jobs/print-job.service.ts)):
 request shape → `printRole` supported/implemented → `commandLanguage`
 recognized → `payloadType` supported → each instruction's `type` known →
 full instruction-list shape → role has a saved mapping → mapped printer
-still installed → `commandLanguage` matches the mapping.
+still installed → `commandLanguage` matches the mapping. See
+[Error codes](#error-codes) below (shared with the PDF path).
 
-#### Rendering (ESC/POS)
+##### Rendering (ESC/POS)
 
 [`src/print-instructions/escpos-instruction.renderer.ts`](src/print-instructions/escpos-instruction.renderer.ts)
 converts the validated instruction list into a `Buffer` using a
@@ -500,12 +585,29 @@ conservative, well-documented ESC/POS command set:
 | `GS ! n`  | `1D 21 n`     | Text size (width/height multiplier nibbles) |
 | `LF`      | `0A`          | Line feed                          |
 | `GS V m`  | `1D 56 m`     | Paper cut: full(0)/partial(1)        |
+| `ESC p m t1 t2` | `1B 70 00 19 FA` | Cash drawer kick (fixed pulse, see below) |
 
-Each `text` instruction resets bold/underline/size/alignment back to
-defaults after its line, so style never leaks into the next instruction.
-Each `cut` instruction adds a small fixed safety feed (3 lines) before the
-cut bytes, on top of whatever explicit `feed` instructions the payload
-already included — see [Current limitations](#current-limitations) for why.
+Each `text` and `leftRight` instruction resets bold/underline/size back to
+defaults after its line (and `text` additionally resets alignment), so
+style never leaks into the next instruction. Each `cut` instruction adds a
+small fixed safety feed (3 lines) before the cut bytes, on top of whatever
+explicit `feed` instructions the payload already included — see
+[Current limitations](#current-limitations) for why. `blank` renders as
+plain `LF` bytes, identical to `feed` — see
+[blank vs feed](#blank-vs-feed) above for why they're still separate
+instruction types.
+
+###### ESC/POS drawer command limitation
+
+`openDrawer` always emits the same fixed pulse — `ESC p 0 25 250`
+(`1B 70 00 19 FA`): pin 2, ~25ms on, ~250ms off. This is a conservative,
+widely-supported default, not a value read from config or tuned per
+printer/drawer model. It is intentionally isolated in one function
+(`escPosOpenDrawer()` in the renderer) so a different pulse or pin can be
+substituted later without touching anything else. See
+[openDrawer](#opendrawer) above for the "never opens automatically" rule,
+and [Current limitations](#current-limitations) for hardware-testing
+status.
 
 The rendered `Buffer` is sent through the exact same raw print adapter
 used by `POST /diagnostics/raw-print` (`sendRawToPrinter()` in
@@ -513,7 +615,7 @@ used by `POST /diagnostics/raw-print` (`sendRawToPrinter()` in
 `POST /print` does not talk to Windows directly, and does not duplicate
 the raw-printing mechanism.
 
-#### Testing with a Generic / Text Only printer mapped to a file
+##### Testing with a Generic / Text Only printer mapped to a file
 
 To verify end to end without real thermal hardware:
 
@@ -533,6 +635,142 @@ To verify end to end without real thermal hardware:
    ```
    You should see `1B 40` (init) at the start, your receipt text as
    readable ASCII in the middle, and `1D 56 00` (full cut) near the end.
+
+#### PDF (a4-invoice)
+
+Prints a caller-generated PDF (A4 invoice, delivery challan, report, ...)
+to the printer mapped to `a4-invoice`. See
+[Why PDF uses a separate path from raw ESC/POS](#why-pdf-uses-a-separate-path-from-raw-escpos)
+for why this is a completely different code path from the ESC/POS flow
+above — it does not reuse `sendRawToPrinter()`, and the raw print adapter
+is never invoked for PDF.
+
+##### Validation rules
+
+- `jobId`, `printRole`, `commandLanguage`, `payloadType` are required (same
+  envelope as `PRINT_INSTRUCTIONS`).
+- `printRole` must be `"a4-invoice"`.
+- `commandLanguage` must be `"PDF"`.
+- `payloadType` must be `"PDF"`.
+- `payloadEncoding` must be `"base64"`.
+- `payload` is required and must be a non-empty base64 string.
+- `copies` defaults to `1`, must be between 1 and 5.
+- The decoded PDF must be non-empty.
+- The decoded PDF must start with the PDF header bytes (`%PDF`).
+- The decoded PDF must be under 10 MB.
+- `a4-invoice` must have a saved printer mapping, that printer must still
+  be installed, and the mapping's `commandLanguage` must be `"PDF"` —
+  identical rules to the ESC/POS flow, just checked against the
+  `a4-invoice` mapping instead of `receipt`.
+
+##### Example request (PDF)
+
+```bash
+curl -X POST http://127.0.0.1:17777/print \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jobId": "INV-1001-A4",
+    "printRole": "a4-invoice",
+    "commandLanguage": "PDF",
+    "payloadType": "PDF",
+    "payloadEncoding": "base64",
+    "copies": 1,
+    "payload": "JVBERi0xLjQKJ..."
+  }'
+```
+
+##### Example response (PDF)
+
+```json
+{
+  "success": true,
+  "jobId": "INV-1001-A4",
+  "printRole": "a4-invoice",
+  "commandLanguage": "PDF",
+  "payloadType": "PDF",
+  "printerName": "HP LaserJet",
+  "copies": 1,
+  "message": "PDF print job sent successfully"
+}
+```
+
+##### SumatraPDF requirement
+
+A normal A4 printer driver does not accept raw PDF bytes through
+`WritePrinter` — PDF needs a PDF-rendering-aware tool in the loop. For this
+MVP that tool is [SumatraPDF](https://www.sumatrapdfreader.org/), invoked
+in silent mode with no UI:
+
+```text
+SumatraPDF.exe -print-to "HP LaserJet" -silent "C:\ProgramData\Pinnacle\PosPrintAgent\temp\print-INV-1001-A4-1700000000000.pdf"
+```
+
+Implemented in
+[`src/pdf/pdf-print.service.ts`](src/pdf/pdf-print.service.ts) using
+`execFile()` with an argument array (never a shell string), so printer
+names/paths can never be interpreted as shell syntax. `copies` is
+supported by invoking SumatraPDF once per copy.
+
+**Expected location** (resolved by
+[`src/pdf/pdf-tool-path.service.ts`](src/pdf/pdf-tool-path.service.ts), in
+this order):
+
+1. Beside `PosPrintAgent.exe`, in a packaged deployment.
+2. `tools/SumatraPDF.exe` in the project root, during development
+   (`npm run dev` or plain `node dist/main.js`).
+3. An explicit override at `config.json`'s `sumatraPdfPath`, if set.
+
+If none of these exist, `POST /print` returns `PDF_PRINT_TOOL_NOT_FOUND`
+rather than silently opening the PDF in a browser/viewer or showing a print
+dialog. This project does not download SumatraPDF automatically — see
+[deployment/windows-service/README.md](deployment/windows-service/README.md#adding-sumatrapdfexe)
+for how to obtain and place it.
+
+##### Temp file behavior
+
+Each PDF print job:
+
+1. Decodes the base64 `payload`.
+2. Validates the decoded bytes (header, size — see Validation rules above).
+3. Writes them to `C:\ProgramData\Pinnacle\PosPrintAgent\temp\print-<sanitized-jobId>-<timestamp>.pdf`
+   (`jobId` is sanitized to `[a-zA-Z0-9_-]` first, so it can't be used to
+   escape the temp directory or produce an invalid filename).
+4. Prints that file via SumatraPDF.
+5. Deletes the temp file afterwards, best-effort — a deletion failure is
+   logged as a warning but does **not** fail the response if printing
+   already succeeded (see
+   [`src/temp/temp-file.service.ts`](src/temp/temp-file.service.ts)).
+
+##### Testing PDF printing
+
+See
+[deployment/windows-service/README.md](deployment/windows-service/README.md#verifying-pdf-printing)
+for a full walkthrough (configure the `a4-invoice` mapping, send a request,
+check the log line, confirm the temp file is cleaned up).
+
+#### Error codes
+
+All `POST /print` errors use the standard
+`{ success: false, errorCode, message }` shape, shared across both payload
+types:
+
+| Error code                        | Used by               | Meaning                                                                                   |
+| ---------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------ |
+| `INVALID_PRINT_PAYLOAD`            | both                   | Request body, `payload.instructions`, or the PDF `payload` string failed basic validation. |
+| `PRINT_ROLE_NOT_CONFIGURED`        | both                   | `printRole` has no saved printer mapping on this machine.                                  |
+| `WINDOWS_PRINTER_NOT_FOUND`        | both                   | The mapped printer is no longer installed on this machine.                                 |
+| `UNSUPPORTED_COMMAND_LANGUAGE`     | both                   | Requested `commandLanguage` doesn't match this role's configured mapping.                  |
+| `UNSUPPORTED_PAYLOAD_TYPE`         | both                   | `payloadType` isn't `"PRINT_INSTRUCTIONS"` or `"PDF"` (e.g. `RAW_COMMAND`).                 |
+| `PRINT_ROLE_NOT_IMPLEMENTED`       | both                   | This `printRole`/`payloadType` combination isn't implemented (e.g. PDF for `receipt`).      |
+| `INSTRUCTION_TYPE_NOT_IMPLEMENTED` | PRINT_INSTRUCTIONS     | An instruction's `type` isn't one of `text`/`line`/`feed`/`cut`.                            |
+| `PRINT_QUEUE_FAILED`               | PRINT_INSTRUCTIONS     | Validation passed but the raw print adapter failed to deliver the rendered bytes.           |
+| `UNSUPPORTED_PAYLOAD_ENCODING`     | PDF                    | `payloadEncoding` isn't `"base64"`.                                                         |
+| `PDF_DECODE_FAILED`                | PDF                    | `payload` isn't valid base64.                                                               |
+| `INVALID_PDF_PAYLOAD`              | PDF                    | Decoded payload is empty or doesn't start with the PDF header (`%PDF`).                     |
+| `PDF_PAYLOAD_TOO_LARGE`            | PDF                    | Decoded PDF exceeds the 10 MB limit.                                                        |
+| `PDF_PRINT_TOOL_NOT_FOUND`         | PDF                    | SumatraPDF.exe could not be found in any known location.                                    |
+| `PDF_PRINT_FAILED`                 | PDF                    | SumatraPDF ran but exited with a failure.                                                   |
+| `TEMP_FILE_WRITE_FAILED`           | PDF                    | Could not write the decoded PDF to the temp folder.                                        |
 
 ### How to test printer discovery
 
@@ -790,7 +1028,7 @@ instead of the page.
 | POST   | `/config/printer-mappings` | Replace the printer mappings for this machine                                |
 | GET    | `/setup`                   | Local HTML setup page (this agent's own UI, static files)                    |
 | POST   | `/test-print`              | Send a test print to a role's configured printer                             |
-| POST   | `/print`                   | Send a `PRINT_INSTRUCTIONS` print job, converted to ESC/POS internally        |
+| POST   | `/print`                   | Send a `PRINT_INSTRUCTIONS` (receipt/ESC_POS) or `PDF` (a4-invoice) print job |
 | POST   | `/diagnostics/raw-print`   | Local-only diagnostic: send raw ESC_POS bytes to a role's configured printer |
 
 All error responses (from any route or unhandled exception) are shaped as:
@@ -875,11 +1113,16 @@ which:
 - Creates `release/PosPrintAgent` if it doesn't exist.
 - Copies the WinSW config and the four `.bat` scripts from
   `deployment/windows-service` into it.
-- Copies any static/setup assets (currently none — the agent has no
-  bundled UI yet) if a `public/` or `static/` folder exists.
+- Copies the `/setup` page's static assets from `src/setup-ui`.
+- Copies `SumatraPDF.exe` from `tools/SumatraPDF.exe` (project root) into
+  the release folder, if present — see
+  [SumatraPDF requirement](#sumatrapdf-requirement). This project does not
+  download it automatically.
 - Writes a support-person-oriented `release/PosPrintAgent/README.md`.
-- Prints next steps, including a warning if `PosPrintAgent.exe` or
-  `PosPrintAgentService.exe` are still missing from the folder.
+- Prints next steps, including a warning if `PosPrintAgent.exe`,
+  `PosPrintAgentService.exe`, or `SumatraPDF.exe` are still missing from
+  the folder (the `SumatraPDF.exe` warning is non-fatal — PDF printing just
+  won't work at that counter until it's added).
 
 Run both together with:
 
@@ -892,6 +1135,8 @@ After this, `release/PosPrintAgent` looks like:
 ```text
 release/PosPrintAgent/
   PosPrintAgent.exe
+  setup-ui/
+  SumatraPDF.exe             <- only if tools/SumatraPDF.exe existed (see below)
   PosPrintAgentService.exe   <- WinSW, added manually (see below)
   PosPrintAgentService.xml
   install-service.bat
@@ -907,6 +1152,12 @@ repo — download it once from the
 to `PosPrintAgentService.exe`, and drop it into `release/PosPrintAgent`
 (it doesn't change between agent releases, so this is a one-time step per
 machine image).
+
+Similarly, `SumatraPDF.exe` is a third-party binary this repo does not
+build or download. Place a copy at `tools/SumatraPDF.exe` in the project
+root before running `npm run prepare:release` and it's copied in
+automatically; otherwise copy it into `release/PosPrintAgent` by hand
+before deploying to a counter that prints A4 invoices.
 
 ### Deploying to a POS Counter
 
@@ -930,14 +1181,16 @@ untouched by an upgrade.
 
 ### Print instructions and rendering
 
-- Only `printRole: "receipt"` with `commandLanguage: "ESC_POS"` is
-  implemented — see [POST /print](#post-print).
-- `barcode-label`, `a4-invoice`, and `cash-drawer` are not implemented in
-  `/print` yet; sending them returns `PRINT_ROLE_NOT_IMPLEMENTED`.
-- `PDF` support will be added later as a separate `payloadType`, not as
-  part of `PRINT_INSTRUCTIONS`.
-- `barcode`, `qr`, `image`, `table`, and drawer-kick instruction types are
-  not implemented yet; sending them returns `INSTRUCTION_TYPE_NOT_IMPLEMENTED`.
+- Only `printRole: "receipt"` with `commandLanguage: "ESC_POS"` and
+  `payloadType: "PRINT_INSTRUCTIONS"` is implemented — see
+  [POST /print](#post-print).
+- `barcode-label` and `cash-drawer` are not implemented in `/print` yet;
+  sending them returns `PRINT_ROLE_NOT_IMPLEMENTED`.
+- `barcode` and `qr` instruction types are intentionally not implemented
+  yet — they need printer-specific testing (symbology support, module
+  size) that's out of scope until that's done; `image` and `table` are
+  also not implemented. Sending any of these returns
+  `INSTRUCTION_TYPE_NOT_IMPLEMENTED`.
 - Text encoding/code page handling is basic: the ESC/POS renderer only
   emits plain ASCII (`0x20`–`0x7E`) and silently replaces anything outside
   that range with `?`. No ESC/POS code-page-selection command is sent, so
@@ -947,12 +1200,45 @@ untouched by an upgrade.
   the cut bytes, on top of any explicit `feed` instructions already in the
   payload — this can produce more blank space than expected if a payload
   already fed generously before cutting.
+- `openDrawer` sends a fixed, conservative ESC/POS drawer-kick pulse (see
+  [ESC/POS drawer command limitation](#escpos-drawer-command-limitation))
+  — it is not configurable per drawer/printer model yet, and whether it
+  actually opens a physical drawer has not been verified against real
+  drawer hardware.
+- There is no separate `/cash-drawer/open` endpoint yet — opening the
+  drawer outside of a receipt print job (e.g. a standalone "open drawer"
+  button not tied to printing) isn't implemented; only the instruction-based
+  `openDrawer` (as part of a `/print` job) is.
 - Physical printer behavior (does the paper actually cut? does text render
-  correctly at 58mm vs 80mm width?) still requires testing against real
-  thermal hardware — everything so far has been verified against a
-  Generic / Text Only printer redirected to a file (see
+  correctly at 58mm vs 80mm width? does `openDrawer` actually kick a real
+  drawer?) still requires testing against real thermal hardware —
+  everything so far has been verified against a Generic / Text Only
+  printer redirected to a file (see
   [Testing with a Generic / Text Only printer mapped to a file](#testing-with-a-generic--text-only-printer-mapped-to-a-file)),
-  not physical paper.
+  not physical paper or a physical drawer.
+
+### PDF (a4-invoice) printing
+
+- Only `printRole: "a4-invoice"` with `commandLanguage: "PDF"` and
+  `payloadType: "PDF"` is implemented — see [PDF (a4-invoice)](#pdf-a4-invoice).
+  Other document-style roles are not implemented.
+- Requires `SumatraPDF.exe` to be present (see
+  [SumatraPDF requirement](#sumatrapdf-requirement)); there is intentionally
+  no fallback to opening the PDF in a viewer or showing a print dialog.
+- The agent does not generate, validate the *content* of, or otherwise
+  understand the PDF beyond its header and size — layout, pagination, and
+  correctness are entirely POS/backend's responsibility.
+- Copies are implemented by invoking SumatraPDF once per copy, not via a
+  single native "N copies" print option — for a small `copies` range (1–5)
+  this is simple and reliable, but it is not the most efficient approach
+  for larger print runs.
+- Network printer behavior under a Windows service account is unverified —
+  see [deployment/windows-service/README.md](deployment/windows-service/README.md#troubleshooting-service-account-printer-access-issues).
+  Local USB printers are the primary MVP target.
+- Only tested so far via a real Windows print pipeline in general; PDF
+  printing specifically still needs verification against SumatraPDF once a
+  copy of it and a real (or virtual) A4 printer are available in this
+  environment.
 
 ### Everything else
 

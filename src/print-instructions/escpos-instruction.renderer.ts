@@ -1,9 +1,12 @@
 import type { z } from "zod";
 import { TextAlignSchema, TextSizeSchema } from "./print-instruction.schema";
 import type {
+  BlankInstruction,
   CutInstruction,
   FeedInstruction,
+  LeftRightInstruction,
   LineInstruction,
+  OpenDrawerInstruction,
   PrintInstructionsPayload,
   TextInstruction,
 } from "./print-instruction.schema";
@@ -73,6 +76,14 @@ function escPosCut(mode: CutInstruction["mode"]): Buffer {
   return Buffer.from([GS, 0x56, mode === "partial" ? 0x01 : 0x00]);
 }
 
+// ESC p 0 25 250 - a conservative, widely-supported default drawer kick
+// pulse (pin 2, ~25ms on, ~250ms off). Kept isolated here so it can be
+// swapped for a printer-specific pulse later without touching callers -
+// see README "ESC/POS drawer command limitation".
+function escPosOpenDrawer(): Buffer {
+  return Buffer.from([ESC, 0x70, 0x00, 0x19, 0xfa]);
+}
+
 function renderTextInstruction(instruction: TextInstruction): Buffer {
   return Buffer.concat([
     escPosAlign(instruction.align),
@@ -103,6 +114,50 @@ function renderCutInstruction(instruction: CutInstruction): Buffer {
   return Buffer.concat([escPosFeed(CUT_SAFETY_FEED_LINES), escPosCut(instruction.mode)]);
 }
 
+/**
+ * Right-aligns `right` against `left` within `width` columns. The right
+ * side always stays fully visible ("Keep right value visible" in the
+ * spec); if there isn't room for both, `left` is truncated to whatever
+ * space remains (possibly to nothing) rather than failing the print job.
+ */
+function formatLeftRight(left: string, right: string, width: number): string {
+  const safeRight = right.length > width ? right.slice(0, width) : right;
+  const availableForLeft = Math.max(width - safeRight.length - 1, 0);
+
+  if (left.length <= availableForLeft) {
+    const gap = Math.max(width - left.length - safeRight.length, 1);
+    return `${left}${" ".repeat(gap)}${safeRight}`;
+  }
+
+  if (availableForLeft === 0) {
+    return safeRight;
+  }
+
+  return `${left.slice(0, availableForLeft)} ${safeRight}`;
+}
+
+function renderLeftRightInstruction(instruction: LeftRightInstruction, width: number): Buffer {
+  const line = formatLeftRight(instruction.left, instruction.right, width);
+  return Buffer.concat([
+    escPosBold(instruction.bold),
+    escPosUnderline(instruction.underline),
+    escPosSize(instruction.size),
+    Buffer.from(toAsciiSafe(line), "ascii"),
+    Buffer.from([LF]),
+    escPosBold(false),
+    escPosUnderline(false),
+    escPosSize("normal"),
+  ]);
+}
+
+function renderBlankInstruction(instruction: BlankInstruction): Buffer {
+  return escPosFeed(instruction.lines);
+}
+
+function renderOpenDrawerInstruction(_instruction: OpenDrawerInstruction): Buffer {
+  return escPosOpenDrawer();
+}
+
 export function renderEscPosInstructions(payload: PrintInstructionsPayload): RenderedEscPosPayload {
   const parts: Buffer[] = [escPosInit()];
 
@@ -119,6 +174,15 @@ export function renderEscPosInstructions(payload: PrintInstructionsPayload): Ren
         break;
       case "cut":
         parts.push(renderCutInstruction(instruction));
+        break;
+      case "leftRight":
+        parts.push(renderLeftRightInstruction(instruction, payload.width));
+        break;
+      case "blank":
+        parts.push(renderBlankInstruction(instruction));
+        break;
+      case "openDrawer":
+        parts.push(renderOpenDrawerInstruction(instruction));
         break;
     }
   }

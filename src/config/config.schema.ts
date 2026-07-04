@@ -23,6 +23,11 @@ export const ConfigSchema = z.object({
     .array(z.string())
     .default(["http://localhost:5173", "https://pos.yourdomain.com"]),
   printerMappings: PrinterMappingsSchema.default({}),
+  // Optional override for where to find SumatraPDF.exe (PDF print adapter).
+  // Only needed if it isn't in one of the conventional locations checked by
+  // pdf-tool-path.service.ts (beside the packaged exe, or the project's
+  // tools/ folder in development).
+  sumatraPdfPath: z.string().optional(),
 });
 
 export type AppConfig = z.infer<typeof ConfigSchema>;

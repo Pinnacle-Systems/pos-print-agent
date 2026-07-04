@@ -1,6 +1,26 @@
-import type { PrintInstruction, PrintInstructionsPayload } from "./print-instruction.schema";
+import type {
+  BlankInstruction,
+  CutInstruction,
+  FeedInstruction,
+  LeftRightInstruction,
+  LineInstruction,
+  OpenDrawerInstruction,
+  PrintInstruction,
+  PrintInstructionsPayload,
+  TextInstruction,
+} from "./print-instruction.schema";
 
-export type { PrintInstruction, PrintInstructionsPayload };
+export type {
+  BlankInstruction,
+  CutInstruction,
+  FeedInstruction,
+  LeftRightInstruction,
+  LineInstruction,
+  OpenDrawerInstruction,
+  PrintInstruction,
+  PrintInstructionsPayload,
+  TextInstruction,
+};
 
 export interface RenderedEscPosPayload {
   buffer: Buffer;

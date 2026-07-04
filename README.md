@@ -1579,6 +1579,24 @@ before deploying to a counter that prints A4 invoices.
 Config and logs under `C:\ProgramData\Pinnacle\PosPrintAgent` are
 untouched by an upgrade.
 
+## Pilot Counter Deployment
+
+Installing on a real POS counter with actual printer hardware (as opposed
+to a dev machine) has its own hands-on checklist, separate from the
+package/build steps above:
+
+- [docs/POS_COUNTER_DEPLOYMENT_CHECKLIST.md](docs/POS_COUNTER_DEPLOYMENT_CHECKLIST.md) —
+  pre-install requirements, installation steps, external dependencies,
+  printer configuration, smoke tests, and real hardware tests for the
+  receipt, barcode-label, A4 PDF, and cash-drawer paths, plus log
+  collection and rollback/uninstall.
+- [docs/POS_COUNTER_HARDWARE_TEST_RESULTS_TEMPLATE.md](docs/POS_COUNTER_HARDWARE_TEST_RESULTS_TEMPLATE.md) —
+  a fillable results template to record what was tested and the final
+  go/no-go decision for that counter.
+
+Use these documents when installing the agent on a real POS counter with
+actual printer hardware.
+
 ## Current limitations
 
 ### Print instructions and rendering

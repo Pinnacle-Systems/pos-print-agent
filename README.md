@@ -37,16 +37,22 @@ it belongs here.
 
 The split is:
 
-- **POS/backend** owns receipt content and layout, *and* owns final
+- **POS/backend** owns receipt/label content and layout, *and* owns final
   document layout for A4 invoices/reports. For receipts it reduces content
   down to a small, generic instruction list (`text` / `line` / `feed` /
-  `cut`); for A4 invoices it generates the final PDF itself.
+  `cut` / ...); for barcode labels it reduces content down to a generic,
+  coordinate-based instruction list (`text` / `barcode` / `box` / `line`)
+  instead — never product/SKU/MRP/GST fields; for A4 invoices it generates
+  the final PDF itself.
 - **Local agent** (this project) owns *local* printer mapping only. For
-  receipts, it converts the generic instruction list into printer-specific
-  command bytes (ESC/POS for now). For A4 invoices, it takes the
-  already-finished PDF as-is and hands it to a PDF-aware print tool. Either
-  way, it sends the result to whichever Windows printer is mapped to that
-  print role on this counter — it never generates layout itself.
+  receipts, it converts the generic instruction list into ESC/POS command
+  bytes. For barcode labels, it converts the (differently-shaped) generic
+  label instruction list into TSPL command text instead — see
+  [Why barcode-label reuses PRINT_INSTRUCTIONS but renders TSPL](#why-barcode-label-reuses-print_instructions-but-renders-tspl).
+  For A4 invoices, it takes the already-finished PDF as-is and hands it to
+  a PDF-aware print tool. Either way, it sends the result to whichever
+  Windows printer is mapped to that print role on this counter — it never
+  generates layout itself.
 
 ### Why the agent does not accept invoice JSON
 
@@ -78,14 +84,36 @@ raw command bytes directly. Two reasons:
 vocabulary, but it is intentionally not implemented in `POST /print` — see
 [Error codes](#error-codes) below.
 
+### Why barcode-label reuses PRINT_INSTRUCTIONS but renders TSPL
+
+`barcode-label` jobs use the same wire-level `payloadType: "PRINT_INSTRUCTIONS"`
+as receipt jobs, but a completely different (coordinate-based)
+instruction vocabulary and a different renderer:
+
+```text
+printRole "receipt"       + PRINT_INSTRUCTIONS → ESC/POS instruction renderer → raw print adapter → receipt printer
+printRole "barcode-label" + PRINT_INSTRUCTIONS → TSPL label renderer         → raw print adapter → label printer
+```
+
+`printRole` (not `payloadType`) is what picks the renderer — see the
+dispatch in
+[`src/print-jobs/print-job.service.ts`](src/print-jobs/print-job.service.ts).
+The two instruction vocabularies are deliberately separate schemas/types/
+renderers (`src/print-instructions/` vs `src/label-instructions/`) — label
+printers are laid out by explicit `x`/`y` dot coordinates on a
+fixed-size label, which has nothing in common with a receipt's
+top-to-bottom, feed-driven layout, so sharing one schema would just make
+both harder to reason about. See
+[Barcode-label printing (TSPL)](#barcode-label-printing-tspl) below.
+
 ### Why PDF uses a separate path from raw ESC/POS
 
 A4 invoices, delivery challans, and reports are document-style output, not
 receipt instructions, so they get a completely separate internal path:
 
 ```text
-PRINT_INSTRUCTIONS → ESC/POS instruction renderer → raw print adapter → receipt printer
-PDF                → decode base64 → temp PDF file → PDF print adapter → Windows printer
+PRINT_INSTRUCTIONS → ESC/POS or TSPL instruction renderer → raw print adapter → receipt/label printer
+PDF                → decode base64 → temp PDF file        → PDF print adapter → Windows printer
 ```
 
 The raw print adapter (`sendRawToPrinter()`) writes bytes straight to the
@@ -421,21 +449,21 @@ physical printer locally, and sends printer-appropriate output to it. This
 is the real print path the web POS should call for production printing;
 `POST /test-print` remains a connectivity smoke test only.
 
-Currently implemented — exactly two `printRole` / `commandLanguage` /
+Currently implemented — exactly three `printRole` / `commandLanguage` /
 `payloadType` combinations:
 
-| `printRole`  | `commandLanguage` | `payloadType`       | What happens                                    |
-| ------------ | ------------------ | ------------------- | ------------------------------------------------ |
-| `receipt`    | `ESC_POS`           | `PRINT_INSTRUCTIONS`| Generic instructions rendered to ESC/POS locally |
-| `a4-invoice` | `PDF`               | `PDF`                | A caller-generated PDF sent via a PDF-aware print tool |
+| `printRole`     | `commandLanguage` | `payloadType`        | What happens                                             |
+| --------------- | ------------------ | -------------------- | --------------------------------------------------------- |
+| `receipt`       | `ESC_POS`           | `PRINT_INSTRUCTIONS` | Generic instructions rendered to ESC/POS locally           |
+| `barcode-label` | `TSPL`              | `PRINT_INSTRUCTIONS` | Generic, coordinate-based label instructions rendered to TSPL locally |
+| `a4-invoice`    | `PDF`               | `PDF`                 | A caller-generated PDF sent via a PDF-aware print tool     |
 
-**`RAW_COMMAND` is never accepted here**, for either role — see
+**`RAW_COMMAND` is never accepted here**, for any role — see
 [Why the public /print API does not accept RAW_COMMAND](#why-the-public-print-api-does-not-accept-raw_command).
 
-Everything else (`barcode-label`, `cash-drawer`, `TSPL`, `ZPL`,
-`WINDOWS_DRIVER`) is a recognized value elsewhere in the system but not
-implemented by this endpoint yet — see
-[Current limitations](#current-limitations).
+Everything else (`cash-drawer`, `ZPL`, `WINDOWS_DRIVER`) is a recognized
+value elsewhere in the system but not implemented by this endpoint yet —
+see [Current limitations](#current-limitations).
 
 #### PRINT_INSTRUCTIONS (receipt)
 
@@ -776,6 +804,179 @@ Confirming the barcode actually scans and the QR actually decodes
 requires printing to real thermal hardware and testing with a barcode
 scanner / phone camera.
 
+#### Barcode-label printing (TSPL)
+
+Prints a generic, coordinate-based label (product/price tag, return label,
+token, ...) to the printer mapped to `barcode-label`, converting it to
+[TSPL](https://en.wikipedia.org/wiki/TSPL) command text. See
+[Why barcode-label reuses PRINT_INSTRUCTIONS but renders TSPL](#why-barcode-label-reuses-print_instructions-but-renders-tspl)
+for why this shares the `PRINT_INSTRUCTIONS` `payloadType` with receipts
+but uses a completely separate schema, type, and renderer
+(`src/label-instructions/`, not `src/print-instructions/`).
+
+##### Coordinate-based layout
+
+Unlike a receipt (top-to-bottom, feed-driven), a label has a fixed
+physical size (`labelWidthMm` × `labelHeightMm`) and every instruction
+places content at an explicit `x`/`y` dot coordinate on that label —
+there's no concept of "the next line." POS/backend decides where every
+`text`/`barcode`/`box`/`line` element goes; the agent has no layout
+opinion of its own and never inspects what the label is *for* (product
+name, MRP, SKU, ...) — it only ever sees generic coordinates and strings.
+
+##### Label payload fields
+
+| Field           | Default | Range       |
+| ---------------- | ------- | ----------- |
+| `labelWidthMm`   | required | 20–110     |
+| `labelHeightMm`  | required | 10–150     |
+| `gapMm`          | `3`     | 0–10        |
+| `density`        | `8`     | 0–15        |
+| `speed`          | `4`     | 1–8         |
+| `direction`      | `1`     | `0` or `1`  |
+| `referenceX`     | `0`     | 0–999       |
+| `referenceY`     | `0`     | 0–999       |
+
+##### Label instruction types
+
+| Type      | Fields |
+| --------- | ------ |
+| `text`    | `x`, `y` (0–2000, required), `value` (string, ≤250 chars, required), `font` (`1`\|`2`\|`3`\|`4`\|`5`\|`TSS24.BF2`\|`TSS16.BF2`, default `3`), `rotation` (`0`\|`90`\|`180`\|`270`, default `0`), `xMultiplier`/`yMultiplier` (1–10, default `1`) |
+| `barcode` | `x`, `y` (0–2000, required), `value` (string, ≤80 chars, required), `symbology` (`128`\|`EAN13`\|`EAN8`, default `128`), `height` (20–300, default `60`), `humanReadable` (default `true`), `rotation` (default `0`), `narrow`/`wide` (1–10, default `2`) |
+| `box`     | `x`, `y`, `xEnd`, `yEnd` (0–2000, required; `xEnd`>`x`, `yEnd`>`y`), `thickness` (1–10, default `1`) |
+| `line`    | `x`, `y` (0–2000, required), `width`, `height` (1–2000, required) |
+
+`EAN13` requires `value` to be exactly 12 or 13 numeric digits; `EAN8`
+requires exactly 7 or 8 numeric digits — both are rejected with
+`INVALID_PRINT_PAYLOAD` before anything is sent to the printer.
+
+##### Example request (barcode-label)
+
+```bash
+curl -X POST http://127.0.0.1:17777/print \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jobId": "LBL-1001",
+    "printRole": "barcode-label",
+    "commandLanguage": "TSPL",
+    "payloadType": "PRINT_INSTRUCTIONS",
+    "copies": 1,
+    "payload": {
+      "labelWidthMm": 50,
+      "labelHeightMm": 25,
+      "gapMm": 3,
+      "density": 8,
+      "speed": 4,
+      "direction": 1,
+      "referenceX": 0,
+      "referenceY": 0,
+      "instructions": [
+        { "type": "text", "x": 20, "y": 20, "value": "Polo T-Shirt", "font": "3", "rotation": 0, "xMultiplier": 1, "yMultiplier": 1 },
+        { "type": "barcode", "x": 20, "y": 60, "value": "8901234567890", "symbology": "128", "height": 60, "humanReadable": true, "rotation": 0, "narrow": 2, "wide": 2 },
+        { "type": "text", "x": 20, "y": 140, "value": "MRP: 799", "font": "3", "rotation": 0, "xMultiplier": 1, "yMultiplier": 1 }
+      ]
+    }
+  }'
+```
+
+##### Example response (barcode-label)
+
+```json
+{
+  "success": true,
+  "jobId": "LBL-1001",
+  "printRole": "barcode-label",
+  "commandLanguage": "TSPL",
+  "payloadType": "PRINT_INSTRUCTIONS",
+  "printerName": "TSC TE244",
+  "copies": 1,
+  "message": "Label print instructions sent successfully"
+}
+```
+
+##### TSPL renderer output
+
+[`src/label-instructions/tspl-label.renderer.ts`](src/label-instructions/tspl-label.renderer.ts)
+converts the validated label payload into a CRLF-terminated TSPL command
+`Buffer`. The example request above renders as:
+
+```text
+SIZE 50 mm,25 mm
+GAP 3 mm,0 mm
+DENSITY 8
+SPEED 4
+DIRECTION 1
+REFERENCE 0,0
+CLS
+TEXT 20,20,"3",0,1,1,"Polo T-Shirt"
+BARCODE 20,60,"128",60,1,0,2,2,"8901234567890"
+TEXT 20,140,"3",0,1,1,"MRP: 799"
+PRINT 1
+```
+
+| Command   | Purpose |
+| --------- | ------- |
+| `SIZE`    | Label width/height in mm |
+| `GAP`     | Gap between labels in mm (fixed-media label rolls) |
+| `DENSITY` | Print darkness (0–15) |
+| `SPEED`   | Print speed (1–8, inches/second) |
+| `DIRECTION` | Print/feed direction |
+| `REFERENCE` | Origin offset for all subsequent coordinates |
+| `CLS`     | Clear the label image buffer before drawing |
+| `TEXT x,y,"font",rotation,xMult,yMult,"value"` | Draw text |
+| `BARCODE x,y,"symbology",height,hriFlag,rotation,narrow,wide,"value"` | Draw a 1D barcode (`hriFlag`: `1` if `humanReadable`, else `0`) |
+| `BOX x,y,xEnd,yEnd,thickness` | Draw a rectangle outline |
+| `BAR x,y,width,height` | Draw a filled bar — the generic `line` instruction maps to this, since TSPL has no separate thin-rule primitive |
+| `PRINT 1` | Print one copy of the current label image |
+
+A double quote (`"`) inside any `text`/`barcode` value is escaped to `\"`
+so it can't prematurely terminate the TSPL string literal. Like the
+ESC/POS renderer, non-ASCII characters (outside `0x20`–`0x7E`) are
+replaced with `?` rather than risking undefined behavior on a given label
+printer's code page.
+
+**The renderer always emits exactly one `PRINT 1`, never `PRINT
+<copies>`.** `copies` (1–5) is handled by `print-job.service.ts` calling
+`sendRawToPrinter()` once per copy with the same fully-rendered buffer —
+the same pattern already used for ESC/POS receipts — rather than relying
+on the printer's own copy-count handling.
+
+Validated in the same order as
+[PRINT_INSTRUCTIONS (receipt)](#print_instructions-receipt): request
+shape → `printRole` supported/implemented → `commandLanguage` recognized
+→ `payloadType` supported → each instruction's `type` known → full
+instruction-list shape → role has a saved mapping → mapped printer still
+installed → `commandLanguage` matches the mapping. See
+[Error codes](#error-codes) below (shared across all three `/print`
+payload types).
+
+##### Testing barcode-label printing with a Generic / Text Only printer mapped to a file
+
+Same file-redirected setup as
+[Testing with a Generic / Text Only printer mapped to a file](#testing-with-a-generic--text-only-printer-mapped-to-a-file),
+except map the printer to `barcode-label` with `commandLanguage: "TSPL"`.
+Send the example request above, then inspect the result — since TSPL is
+plain text (not binary ESC/POS bytes), a plain read works:
+
+```powershell
+Get-Content C:\Temp\raw-printer-output.prn
+```
+
+or, to see the raw bytes/line-endings:
+
+```powershell
+Format-Hex C:\Temp\raw-printer-output.prn
+```
+
+You should see `SIZE`, `GAP`, `DENSITY`, `SPEED`, `DIRECTION`,
+`REFERENCE`, `CLS`, then one line per instruction, ending in `PRINT 1`.
+
+**This only proves the command text is correct** — a file-redirected
+Generic / Text Only printer cannot render a physical label. Confirming
+labels actually print correctly (size, gap detection, barcode
+scannability) requires a real TSPL-compatible label printer (e.g. TSC,
+Zebra in TSPL-emulation mode).
+
 #### PDF (a4-invoice)
 
 Prints a caller-generated PDF (A4 invoice, delivery challan, report, ...)
@@ -891,26 +1092,26 @@ check the log line, confirm the temp file is cleaned up).
 #### Error codes
 
 All `POST /print` errors use the standard
-`{ success: false, errorCode, message }` shape, shared across both payload
-types:
+`{ success: false, errorCode, message }` shape, shared across all three
+`printRole`/`commandLanguage`/`payloadType` combinations:
 
-| Error code                        | Used by               | Meaning                                                                                   |
-| ---------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------ |
-| `INVALID_PRINT_PAYLOAD`            | both                   | Request body, `payload.instructions`, or the PDF `payload` string failed basic validation. |
-| `PRINT_ROLE_NOT_CONFIGURED`        | both                   | `printRole` has no saved printer mapping on this machine.                                  |
-| `WINDOWS_PRINTER_NOT_FOUND`        | both                   | The mapped printer is no longer installed on this machine.                                 |
-| `UNSUPPORTED_COMMAND_LANGUAGE`     | both                   | Requested `commandLanguage` doesn't match this role's configured mapping.                  |
-| `UNSUPPORTED_PAYLOAD_TYPE`         | both                   | `payloadType` isn't `"PRINT_INSTRUCTIONS"` or `"PDF"` (e.g. `RAW_COMMAND`).                 |
-| `PRINT_ROLE_NOT_IMPLEMENTED`       | both                   | This `printRole`/`payloadType` combination isn't implemented (e.g. PDF for `receipt`).      |
-| `INSTRUCTION_TYPE_NOT_IMPLEMENTED` | PRINT_INSTRUCTIONS     | An instruction's `type` isn't one of `text`/`line`/`feed`/`cut`/`leftRight`/`blank`/`openDrawer`/`barcode`/`qr`. |
-| `PRINT_QUEUE_FAILED`               | PRINT_INSTRUCTIONS     | Validation passed but the raw print adapter failed to deliver the rendered bytes.           |
-| `UNSUPPORTED_PAYLOAD_ENCODING`     | PDF                    | `payloadEncoding` isn't `"base64"`.                                                         |
-| `PDF_DECODE_FAILED`                | PDF                    | `payload` isn't valid base64.                                                               |
-| `INVALID_PDF_PAYLOAD`              | PDF                    | Decoded payload is empty or doesn't start with the PDF header (`%PDF`).                     |
-| `PDF_PAYLOAD_TOO_LARGE`            | PDF                    | Decoded PDF exceeds the 10 MB limit.                                                        |
-| `PDF_PRINT_TOOL_NOT_FOUND`         | PDF                    | SumatraPDF.exe could not be found in any known location.                                    |
-| `PDF_PRINT_FAILED`                 | PDF                    | SumatraPDF ran but exited with a failure.                                                   |
-| `TEMP_FILE_WRITE_FAILED`           | PDF                    | Could not write the decoded PDF to the temp folder.                                        |
+| Error code                        | Used by                        | Meaning                                                                                   |
+| ---------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------ |
+| `INVALID_PRINT_PAYLOAD`            | all                              | Request body, `payload.instructions`, or the PDF `payload` string failed basic validation. |
+| `PRINT_ROLE_NOT_CONFIGURED`        | all                              | `printRole` has no saved printer mapping on this machine.                                  |
+| `WINDOWS_PRINTER_NOT_FOUND`        | all                              | The mapped printer is no longer installed on this machine.                                 |
+| `UNSUPPORTED_COMMAND_LANGUAGE`     | all                              | Requested `commandLanguage` doesn't match this role's configured mapping.                  |
+| `UNSUPPORTED_PAYLOAD_TYPE`         | all                              | `payloadType` isn't `"PRINT_INSTRUCTIONS"` or `"PDF"` (e.g. `RAW_COMMAND`).                 |
+| `PRINT_ROLE_NOT_IMPLEMENTED`       | all                              | This `printRole`/`payloadType` combination isn't implemented (e.g. PDF for `receipt`, or `PRINT_INSTRUCTIONS` for `cash-drawer`). |
+| `INSTRUCTION_TYPE_NOT_IMPLEMENTED` | PRINT_INSTRUCTIONS (receipt/label) | An instruction's `type` isn't a known one for that `printRole` — `text`/`line`/`feed`/`cut`/`leftRight`/`blank`/`openDrawer`/`barcode`/`qr` for `receipt`, or `text`/`barcode`/`box`/`line` for `barcode-label`. |
+| `PRINT_QUEUE_FAILED`               | PRINT_INSTRUCTIONS (receipt/label) | Validation passed but the raw print adapter failed to deliver the rendered bytes.           |
+| `UNSUPPORTED_PAYLOAD_ENCODING`     | PDF                              | `payloadEncoding` isn't `"base64"`.                                                         |
+| `PDF_DECODE_FAILED`                | PDF                              | `payload` isn't valid base64.                                                               |
+| `INVALID_PDF_PAYLOAD`              | PDF                              | Decoded payload is empty or doesn't start with the PDF header (`%PDF`).                     |
+| `PDF_PAYLOAD_TOO_LARGE`            | PDF                              | Decoded PDF exceeds the 10 MB limit.                                                        |
+| `PDF_PRINT_TOOL_NOT_FOUND`         | PDF                              | SumatraPDF.exe could not be found in any known location.                                    |
+| `PDF_PRINT_FAILED`                 | PDF                              | SumatraPDF ran but exited with a failure.                                                   |
+| `TEMP_FILE_WRITE_FAILED`           | PDF                              | Could not write the decoded PDF to the temp folder.                                        |
 
 ### How to test printer discovery
 
@@ -1168,7 +1369,7 @@ instead of the page.
 | POST   | `/config/printer-mappings` | Replace the printer mappings for this machine                                |
 | GET    | `/setup`                   | Local HTML setup page (this agent's own UI, static files)                    |
 | POST   | `/test-print`              | Send a test print to a role's configured printer                             |
-| POST   | `/print`                   | Send a `PRINT_INSTRUCTIONS` (receipt/ESC_POS) or `PDF` (a4-invoice) print job |
+| POST   | `/print`                   | Send a `PRINT_INSTRUCTIONS` (receipt/ESC_POS or barcode-label/TSPL) or `PDF` (a4-invoice) print job |
 | POST   | `/diagnostics/raw-print`   | Local-only diagnostic: send raw ESC_POS bytes to a role's configured printer |
 
 All error responses (from any route or unhandled exception) are shaped as:
@@ -1321,23 +1522,25 @@ untouched by an upgrade.
 
 ### Print instructions and rendering
 
-- Only `printRole: "receipt"` with `commandLanguage: "ESC_POS"` and
-  `payloadType: "PRINT_INSTRUCTIONS"` is implemented — see
+- Only `printRole: "receipt"` with `commandLanguage: "ESC_POS"`, and
+  `printRole: "barcode-label"` with `commandLanguage: "TSPL"`, are
+  implemented for `payloadType: "PRINT_INSTRUCTIONS"` — see
   [POST /print](#post-print).
-- `barcode-label` and `cash-drawer` are not implemented in `/print` yet;
-  sending them returns `PRINT_ROLE_NOT_IMPLEMENTED`.
+- `cash-drawer` (as a standalone print role, distinct from the `receipt`
+  instruction-based `openDrawer`) is not implemented in `/print` yet;
+  sending it returns `PRINT_ROLE_NOT_IMPLEMENTED`.
 - `barcode` (`CODE128`/`EAN13` only) and `qr` instruction types are
-  implemented, but ESC/POS barcode/QR command support and conventions
-  (e.g. CODE128 code-set prefixing) vary across printer models — see
+  implemented for receipts, but ESC/POS barcode/QR command support and
+  conventions (e.g. CODE128 code-set prefixing) vary across printer
+  models — see
   [ESC/POS barcode command limitation](#escpos-barcode-command-limitation)
   and [ESC/POS QR command limitation](#escpos-qr-command-limitation).
   Real scannability has only been verified as correct command bytes
   against a file-redirected printer (see
   [Testing barcode and QR printing](#testing-barcode-and-qr-printing)),
   not against a physical scanner or thermal hardware. `image` and `table`
-  instruction types, and TSPL/ZPL barcode-label printing, are not
-  implemented. Sending any unimplemented instruction type returns
-  `INSTRUCTION_TYPE_NOT_IMPLEMENTED`.
+  instruction types are not implemented. Sending any unimplemented
+  instruction type returns `INSTRUCTION_TYPE_NOT_IMPLEMENTED`.
 - Text encoding/code page handling is basic: the ESC/POS renderer only
   emits plain ASCII (`0x20`–`0x7E`) and silently replaces anything outside
   that range with `?`. No ESC/POS code-page-selection command is sent, so
@@ -1363,6 +1566,35 @@ untouched by an upgrade.
   printer redirected to a file (see
   [Testing with a Generic / Text Only printer mapped to a file](#testing-with-a-generic--text-only-printer-mapped-to-a-file)),
   not physical paper or a physical drawer.
+
+### Barcode-label (TSPL) printing
+
+- Only `printRole: "barcode-label"` with `commandLanguage: "TSPL"` and
+  `payloadType: "PRINT_INSTRUCTIONS"` is implemented — see
+  [Barcode-label printing (TSPL)](#barcode-label-printing-tspl). `ZPL`
+  (Zebra's native label language, distinct from TSPL) is a recognized
+  `commandLanguage` value elsewhere in the system but is not implemented
+  here; sending it returns `UNSUPPORTED_COMMAND_LANGUAGE`.
+- QR code label printing is not implemented yet — only `text`, `barcode`
+  (`128`/`EAN13`/`EAN8`), `box`, and `line` label instruction types exist.
+  Sending an unimplemented label instruction type returns
+  `INSTRUCTION_TYPE_NOT_IMPLEMENTED`.
+- TSPL support is verified by inspecting generated command text against a
+  file-redirected Generic / Text Only printer (see
+  [Testing barcode-label printing with a Generic / Text Only printer mapped to a file](#testing-barcode-label-printing-with-a-generic--text-only-printer-mapped-to-a-file)) —
+  this proves the command sequence is correct, not that a label actually
+  prints correctly. Real label output (label size/gap detection, barcode
+  scannability, print darkness/speed suitability) requires testing with an
+  actual TSPL-compatible label printer.
+- Label dimensions, coordinates, fonts, and all instruction content are
+  entirely controlled by the caller's (POS/backend's) instruction payload
+  — the agent has no default layout and no idea what a label is *for*
+  (product, SKU, MRP, ...); see
+  [Why barcode-label reuses PRINT_INSTRUCTIONS but renders TSPL](#why-barcode-label-reuses-print_instructions-but-renders-tspl).
+- Like the ESC/POS renderer, the TSPL renderer only emits plain ASCII
+  (`0x20`–`0x7E`) and silently replaces anything outside that range with
+  `?` — no TSPL codepage selection is implemented, so accented characters
+  and non-Latin scripts are not supported yet.
 
 ### PDF (a4-invoice) printing
 

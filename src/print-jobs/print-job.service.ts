@@ -2,6 +2,8 @@ import type { ZodIssue } from "zod";
 import type { PrinterMapping } from "../config/config.schema";
 import { getConfig } from "../config/config.service";
 import { AppError } from "../errors/app-error";
+import { KNOWN_LABEL_INSTRUCTION_TYPES, TsplLabelPayloadSchema } from "../label-instructions/tspl-label.schema";
+import { renderTsplLabel } from "../label-instructions/tspl-label.renderer";
 import { logger } from "../logging/logger";
 import { decodeBase64Pdf, hasPdfHeader, isLikelyBase64, MAX_PDF_SIZE_BYTES, PDF_PAYLOAD_ENCODING } from "../pdf/pdf-payload.schema";
 import { printPdfFile } from "../pdf/pdf-print.service";
@@ -13,7 +15,7 @@ import { buildTempPdfFilePath, deleteTempFileBestEffort, writeTempFile } from ".
 import { PrintJobRequestSchema } from "./print-job.schema";
 import { isCommandLanguage, isPrintRole, type CommandLanguage, type PrintRole } from "./print-role";
 
-// This prompt implements exactly two printRole/commandLanguage/payloadType
+// This prompt implements exactly three printRole/commandLanguage/payloadType
 // combinations. Other PRINT_ROLES/COMMAND_LANGUAGES values are real,
 // recognized concepts elsewhere in the system (see print-role.ts) - they
 // are just not wired up to a renderer here yet, hence
@@ -22,6 +24,13 @@ import { isCommandLanguage, isPrintRole, type CommandLanguage, type PrintRole } 
 const RECEIPT_PAYLOAD_TYPE = "PRINT_INSTRUCTIONS";
 const RECEIPT_PRINT_ROLE: PrintRole = "receipt";
 const RECEIPT_COMMAND_LANGUAGE: CommandLanguage = "ESC_POS";
+
+// Same wire-level payloadType ("PRINT_INSTRUCTIONS") as the receipt path -
+// printRole is what distinguishes "convert to ESC/POS" from "convert to
+// TSPL" (see the payloadType/printRole dispatch in processPrintJob below).
+const LABEL_PAYLOAD_TYPE = "PRINT_INSTRUCTIONS";
+const LABEL_PRINT_ROLE: PrintRole = "barcode-label";
+const LABEL_COMMAND_LANGUAGE: CommandLanguage = "TSPL";
 
 const PDF_PAYLOAD_TYPE = "PDF";
 const PDF_PRINT_ROLE: PrintRole = "a4-invoice";
@@ -95,13 +104,14 @@ function assertCommandLanguageMatches(
 
 /**
  * Rejects payload.instructions entries whose "type" isn't one of the
- * implemented instruction types, with a dedicated error code
- * (INSTRUCTION_TYPE_NOT_IMPLEMENTED) distinct from a malformed-but-known
- * instruction (which falls through to the Zod schema below and becomes
- * INVALID_PRINT_PAYLOAD). Runs before the full schema parse so an unknown
- * type is never misreported as a generic shape error.
+ * implemented instruction types for the given instruction vocabulary
+ * (ESC/POS receipt instructions or TSPL label instructions), with a
+ * dedicated error code (INSTRUCTION_TYPE_NOT_IMPLEMENTED) distinct from a
+ * malformed-but-known instruction (which falls through to the Zod schema
+ * below and becomes INVALID_PRINT_PAYLOAD). Runs before the full schema
+ * parse so an unknown type is never misreported as a generic shape error.
  */
-function assertKnownInstructionTypes(payload: unknown): void {
+function assertKnownInstructionTypes(payload: unknown, knownTypes: readonly string[]): void {
   if (typeof payload !== "object" || payload === null) {
     return;
   }
@@ -113,11 +123,11 @@ function assertKnownInstructionTypes(payload: unknown): void {
 
   for (const instruction of instructions) {
     const type = typeof instruction === "object" && instruction !== null ? (instruction as { type?: unknown }).type : undefined;
-    if (typeof type !== "string" || !(KNOWN_INSTRUCTION_TYPES as readonly string[]).includes(type)) {
+    if (typeof type !== "string" || !knownTypes.includes(type)) {
       throw new AppError(
         400,
         "INSTRUCTION_TYPE_NOT_IMPLEMENTED",
-        `Instruction type "${String(type)}" is not implemented. Supported types: ${KNOWN_INSTRUCTION_TYPES.join(", ")}`,
+        `Instruction type "${String(type)}" is not implemented. Supported types: ${knownTypes.join(", ")}`,
       );
     }
   }
@@ -149,11 +159,11 @@ async function processReceiptInstructionsJob(
     throw new AppError(
       400,
       "PRINT_ROLE_NOT_IMPLEMENTED",
-      `payloadType "${RECEIPT_PAYLOAD_TYPE}" is only implemented for print role "${RECEIPT_PRINT_ROLE}", not "${printRole}".`,
+      `payloadType "${RECEIPT_PAYLOAD_TYPE}" is only implemented for print roles "${RECEIPT_PRINT_ROLE}" and "${LABEL_PRINT_ROLE}", not "${printRole}".`,
     );
   }
 
-  assertKnownInstructionTypes(payload);
+  assertKnownInstructionTypes(payload, KNOWN_INSTRUCTION_TYPES);
 
   const payloadParsed = PrintInstructionsPayloadSchema.safeParse(payload);
   if (!payloadParsed.success) {
@@ -191,6 +201,69 @@ async function processReceiptInstructionsJob(
     printerName: mapping.windowsPrinterName,
     copies,
     message: "Print instructions sent successfully",
+  };
+}
+
+/**
+ * Converts a generic PRINT_INSTRUCTIONS label payload into TSPL bytes and
+ * sends it to the locally mapped Windows printer for printRole
+ * "barcode-label". Like processReceiptInstructionsJob, this never inspects
+ * product/SKU/MRP/GST-shaped fields - POS/backend already reduced label
+ * content down to coordinate-based text/barcode/box/line instructions
+ * before this is called.
+ */
+async function processBarcodeLabelJob(
+  request: ParsedPrintJobRequest,
+  logFields: Record<string, unknown>,
+): Promise<PrintJobResult> {
+  const { jobId, printRole, commandLanguage, payloadType, copies, payload } = request;
+
+  if (printRole !== LABEL_PRINT_ROLE) {
+    throw new AppError(
+      400,
+      "PRINT_ROLE_NOT_IMPLEMENTED",
+      `payloadType "${LABEL_PAYLOAD_TYPE}" is only implemented for print roles "${RECEIPT_PRINT_ROLE}" and "${LABEL_PRINT_ROLE}", not "${printRole}".`,
+    );
+  }
+
+  assertKnownInstructionTypes(payload, KNOWN_LABEL_INSTRUCTION_TYPES);
+
+  const payloadParsed = TsplLabelPayloadSchema.safeParse(payload);
+  if (!payloadParsed.success) {
+    throw new AppError(400, "INVALID_PRINT_PAYLOAD", formatZodIssues(payloadParsed.error.issues));
+  }
+
+  const mapping = resolvePrinterMapping(printRole);
+  await assertPrinterInstalled(printRole, mapping);
+  logFields.printerName = mapping.windowsPrinterName;
+  assertCommandLanguageMatches(printRole, mapping, commandLanguage, LABEL_COMMAND_LANGUAGE);
+
+  const { buffer, instructionCount } = renderTsplLabel(payloadParsed.data);
+  logFields.instructionCount = instructionCount;
+  logFields.renderedPayloadSizeBytes = buffer.length;
+
+  for (let copyIndex = 0; copyIndex < copies; copyIndex += 1) {
+    const jobName = copies > 1 ? `${jobId}-copy-${copyIndex + 1}` : jobId;
+    try {
+      await sendRawToPrinter({ printerName: mapping.windowsPrinterName, jobName, data: buffer });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      throw new AppError(
+        502,
+        "PRINT_QUEUE_FAILED",
+        `Failed to send copy ${copyIndex + 1}/${copies} to "${mapping.windowsPrinterName}": ${message}`,
+      );
+    }
+  }
+
+  return {
+    jobId,
+    printRole,
+    commandLanguage,
+    payloadType,
+    printerName: mapping.windowsPrinterName,
+    copies,
+    message: "Label print instructions sent successfully",
   };
 }
 
@@ -322,7 +395,19 @@ export async function processPrintJob(rawBody: unknown): Promise<PrintJobResult>
 
     let result: PrintJobResult;
     if (payloadType === RECEIPT_PAYLOAD_TYPE) {
-      result = await processReceiptInstructionsJob(parsedRequest, logFields);
+      // Same wire payloadType ("PRINT_INSTRUCTIONS") for both receipt/ESC_POS
+      // and barcode-label/TSPL - printRole is what picks the renderer here.
+      if (printRole === RECEIPT_PRINT_ROLE) {
+        result = await processReceiptInstructionsJob(parsedRequest, logFields);
+      } else if (printRole === LABEL_PRINT_ROLE) {
+        result = await processBarcodeLabelJob(parsedRequest, logFields);
+      } else {
+        throw new AppError(
+          400,
+          "PRINT_ROLE_NOT_IMPLEMENTED",
+          `payloadType "${RECEIPT_PAYLOAD_TYPE}" is only implemented for print roles "${RECEIPT_PRINT_ROLE}" and "${LABEL_PRINT_ROLE}", not "${printRole}".`,
+        );
+      }
     } else if (payloadType === PDF_PAYLOAD_TYPE) {
       result = await processPdfJob(parsedRequest, logFields);
     } else {

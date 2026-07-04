@@ -28,6 +28,55 @@ application.
 This service is designed to be installed as a Windows service via
 [WinSW](https://github.com/winsw/winsw), one instance per POS counter.
 
+## Dumb bridge plus print-instruction design
+
+This agent is a **dumb bridge**, not a receipt-rendering engine. It has no
+opinion about invoices, GST, discounts, offer reversal, item rows, or
+payment correctness — that is all POS/backend business logic, and none of
+it belongs here.
+
+The split is:
+
+- **POS/backend** owns receipt content and layout. It decides what text
+  appears, in what order, bold/aligned/sized however the business wants,
+  and reduces all of that down to a small, generic instruction list
+  (`text` / `line` / `feed` / `cut`).
+- **Local agent** (this project) owns *local* printer mapping only. It
+  takes that generic instruction list and converts it into
+  printer-specific command bytes (ESC/POS for now), then sends those bytes
+  to whichever Windows printer is mapped to that print role on this
+  counter.
+
+### Why the agent does not accept invoice JSON
+
+If the agent understood invoice shape (line items, tax breakdown, offers,
+payment method), every POS business rule change — a new discount type, a
+reworded tax line, a layout tweak — would require redeploying the agent to
+every counter machine. Keeping the agent ignorant of invoice JSON means
+POS/backend can change receipt content and layout freely without ever
+touching code running on counter hardware. The agent only ever sees
+`{ type: "text", value: "...", ... }` — never `{ gstAmount, discountRows,
+offerId, ... }`.
+
+### Why the public /print API does not accept RAW_COMMAND
+
+The agent *internally* generates raw ESC/POS bytes (see
+[Raw Printing Diagnostic](#raw-printing-diagnostic) — that adapter already
+exists and is reused here), but `POST /print` does not let a caller hand it
+raw command bytes directly. Two reasons:
+
+- Raw bytes are printer/command-language-specific and easy to get subtly
+  wrong (wrong cut command, wrong code page, malformed escape sequence) —
+  the web POS should never need to know ESC/POS byte sequences at all.
+- It keeps the architecture boundary honest: if the public API accepted
+  raw bytes, nothing would stop POS/backend from building printer-specific
+  logic on the wrong side of the boundary, quietly reintroducing the exact
+  coupling this design avoids.
+
+`RAW_COMMAND` is a recognized concept in the wider system's `payloadType`
+vocabulary, but it is intentionally not implemented in `POST /print` — see
+[Error Codes](#error-codes) below.
+
 ## Requirements
 
 - Node.js 18+
@@ -322,8 +371,9 @@ on Windows it writes a short text file and pipes it through PowerShell's
 approach as printer discovery), so it goes through the real Windows print
 spooler. This confirms the agent can reach the configured printer end to
 end; it is **not** raw ESC_POS/TSPL/ZPL byte printing, and it does not open
-a cash drawer — those remain future work (see
-[What is intentionally not implemented yet](#what-is-intentionally-not-implemented-yet)).
+a cash drawer. Production receipt printing is `POST /print` (below); cash
+drawer opening remains future work (see
+[Current limitations](#current-limitations)).
 
 Errors:
 
@@ -335,6 +385,154 @@ Errors:
 - `502 TEST_PRINT_FAILED` — the mapped printer exists in config but
   Windows/PowerShell couldn't spool a job to it (e.g. printer removed,
   offline, or a permissions issue).
+
+### POST /print
+
+Accepts a generic print job — logical `printRole` + `commandLanguage` +
+a `payloadType` describing the shape of `payload` — converts it to
+printer command bytes, and sends it to the printer mapped to that role.
+This is the real print path the web POS should call for receipts; it
+supersedes `POST /test-print` (a connectivity smoke test) for actual
+production printing.
+
+Currently implemented:
+
+- `printRole`: only `"receipt"`.
+- `commandLanguage`: only `"ESC_POS"`.
+- `payloadType`: only `"PRINT_INSTRUCTIONS"` — a generic, printer-agnostic
+  list of instructions (`text`, `line`, `feed`, `cut`). **`RAW_COMMAND` is
+  not accepted here** — see
+  [Why the public /print API does not accept RAW_COMMAND](#why-the-public-print-api-does-not-accept-raw_command).
+
+Everything else (`barcode-label`, `a4-invoice`, `cash-drawer`, `TSPL`,
+`ZPL`, `PDF`, `WINDOWS_DRIVER`) is a recognized value elsewhere in the
+system but not implemented by this endpoint yet — see
+[Current limitations](#current-limitations).
+
+#### Instruction types
+
+| Type   | Fields                                                                                                   |
+| ------ | ---------------------------------------------------------------------------------------------------------------- |
+| `text` | `value` (string, ≤500 chars), `align` (`left`\|`center`\|`right`, default `left`), `bold` (default `false`), `underline` (default `false`), `size` (`normal`\|`double-width`\|`double-height`\|`double`, default `normal`) |
+| `line` | `char` (single printable character, default `-`) — repeated to `payload.width` |
+| `feed` | `lines` (1–10) |
+| `cut`  | `mode` (`full`\|`partial`, default `full`) |
+
+`payload.width` (default `42`, must be 32–48) sets both the `line`
+character count and is otherwise informational for the caller — it does
+not currently drive text wrapping.
+
+#### Example request
+
+```bash
+curl -X POST http://127.0.0.1:17777/print \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jobId": "INV-1001",
+    "printRole": "receipt",
+    "commandLanguage": "ESC_POS",
+    "payloadType": "PRINT_INSTRUCTIONS",
+    "copies": 1,
+    "payload": {
+      "width": 42,
+      "instructions": [
+        { "type": "text", "value": "MY STORE", "align": "center", "bold": true },
+        { "type": "text", "value": "Coimbatore", "align": "center" },
+        { "type": "text", "value": "Invoice: INV-1001" },
+        { "type": "line" },
+        { "type": "text", "value": "Grand Total                1000.00", "bold": true },
+        { "type": "feed", "lines": 4 },
+        { "type": "cut", "mode": "full" }
+      ]
+    }
+  }'
+```
+
+#### Example response
+
+```json
+{
+  "success": true,
+  "jobId": "INV-1001",
+  "printRole": "receipt",
+  "commandLanguage": "ESC_POS",
+  "payloadType": "PRINT_INSTRUCTIONS",
+  "printerName": "EPSON TM-T82X Receipt",
+  "copies": 1,
+  "message": "Print instructions sent successfully"
+}
+```
+
+#### Error codes
+
+All errors use the standard `{ success: false, errorCode, message }` shape.
+
+| Error code                       | Meaning                                                                              |
+| --------------------------------- | ------------------------------------------------------------------------------------ |
+| `INVALID_PRINT_PAYLOAD`           | Request body or `payload.instructions` shape failed validation (Zod).               |
+| `PRINT_ROLE_NOT_CONFIGURED`       | `printRole` has no saved printer mapping on this machine.                            |
+| `WINDOWS_PRINTER_NOT_FOUND`       | The mapped printer is no longer installed on this machine.                           |
+| `UNSUPPORTED_COMMAND_LANGUAGE`    | Requested `commandLanguage` doesn't match this role's configured mapping.            |
+| `UNSUPPORTED_PAYLOAD_TYPE`        | `payloadType` isn't `"PRINT_INSTRUCTIONS"` (e.g. `RAW_COMMAND`).                     |
+| `PRINT_ROLE_NOT_IMPLEMENTED`      | `printRole` is a real role but not implemented by `/print` yet (anything but `receipt`). |
+| `INSTRUCTION_TYPE_NOT_IMPLEMENTED`| An instruction's `type` isn't one of `text`/`line`/`feed`/`cut`.                     |
+| `PRINT_QUEUE_FAILED`              | Validation passed but the raw print adapter failed to deliver the rendered bytes.    |
+
+Validated in this order (see
+[`src/print-jobs/print-job.service.ts`](src/print-jobs/print-job.service.ts)):
+request shape → `printRole` supported/implemented → `commandLanguage`
+recognized → `payloadType` supported → each instruction's `type` known →
+full instruction-list shape → role has a saved mapping → mapped printer
+still installed → `commandLanguage` matches the mapping.
+
+#### Rendering (ESC/POS)
+
+[`src/print-instructions/escpos-instruction.renderer.ts`](src/print-instructions/escpos-instruction.renderer.ts)
+converts the validated instruction list into a `Buffer` using a
+conservative, well-documented ESC/POS command set:
+
+| Command   | Bytes         | Purpose                        |
+| --------- | ------------- | ------------------------------- |
+| `ESC @`   | `1B 40`       | Initialize printer               |
+| `ESC a n` | `1B 61 n`     | Align left(0)/center(1)/right(2) |
+| `ESC E n` | `1B 45 n`     | Bold on(1)/off(0)                 |
+| `ESC - n` | `1B 2D n`     | Underline on(1)/off(0)             |
+| `GS ! n`  | `1D 21 n`     | Text size (width/height multiplier nibbles) |
+| `LF`      | `0A`          | Line feed                          |
+| `GS V m`  | `1D 56 m`     | Paper cut: full(0)/partial(1)        |
+
+Each `text` instruction resets bold/underline/size/alignment back to
+defaults after its line, so style never leaks into the next instruction.
+Each `cut` instruction adds a small fixed safety feed (3 lines) before the
+cut bytes, on top of whatever explicit `feed` instructions the payload
+already included — see [Current limitations](#current-limitations) for why.
+
+The rendered `Buffer` is sent through the exact same raw print adapter
+used by `POST /diagnostics/raw-print` (`sendRawToPrinter()` in
+[`src/printers/raw-print.service.ts`](src/printers/raw-print.service.ts)) —
+`POST /print` does not talk to Windows directly, and does not duplicate
+the raw-printing mechanism.
+
+#### Testing with a Generic / Text Only printer mapped to a file
+
+To verify end to end without real thermal hardware:
+
+1. In Windows, add a printer using the **Generic / Text Only** driver.
+2. Point its port at a specific file instead of the interactive `FILE:`
+   port, so printing doesn't hang waiting for a "Save As" dialog:
+   ```powershell
+   Add-PrinterPort -Name "C:\Temp\raw-printer-output.prn"
+   Set-Printer -Name "<your printer name>" -PortName "C:\Temp\raw-printer-output.prn"
+   ```
+3. Map it to `receipt` with `commandLanguage: "ESC_POS"` via
+   `POST /config/printer-mappings` (or the setup page).
+4. `POST /print` with a `PRINT_INSTRUCTIONS` payload (see example above).
+5. Inspect the result:
+   ```powershell
+   Format-Hex C:\Temp\raw-printer-output.prn
+   ```
+   You should see `1B 40` (init) at the start, your receipt text as
+   readable ASCII in the middle, and `1D 56 00` (full cut) near the end.
 
 ### How to test printer discovery
 
@@ -357,6 +555,123 @@ validation without a Windows box.
 You don't need to send every role at once — send whichever roles this
 counter actually has printers for; unmapped roles simply show
 `"configured": false`.
+
+## Raw Printing Diagnostic
+
+`POST /test-print` and `POST /diagnostics/raw-print` both send something to
+a configured printer, but they exercise completely different Windows
+printing paths, and they answer different questions. In short:
+
+- `/test-print` checks basic Windows printer connectivity.
+- `/diagnostics/raw-print` checks raw ESC_POS byte delivery.
+- `/print` (see [above](#post-print)) accepts generic print instructions
+  and converts them to ESC/POS internally, sending the result through the
+  same raw adapter `/diagnostics/raw-print` uses.
+
+| | `POST /test-print` | `POST /diagnostics/raw-print` |
+| --- | --- | --- |
+| Mechanism | PowerShell `Out-Printer` | PowerShell `Add-Type` compiling an inline C# `winspool.drv` P/Invoke helper (`OpenPrinter`/`StartDocPrinter`/`WritePrinter`), print job datatype `RAW` |
+| Goes through | The normal Windows GDI print pipeline (the same path a Word document takes) | The spooler's raw datatype, bypassing GDI text rendering entirely |
+| Proves | The agent can reach the printer and Windows can spool *a* job to it | Raw ESC_POS/TSPL/ZPL command bytes can be delivered to the printer largely unmodified |
+| Cannot do | Send raw ESC_POS commands (paper cut, cash-drawer kick) — GDI text rendering does not pass control bytes through | Reliably work against printers/drivers that don't accept `RAW` datatype (see finding below) |
+| Used for | The setup page's "Test Receipt/Barcode/A4/Cash Drawer" buttons | Local development/support diagnostics only |
+
+Implementation:
+
+- [`src/printers/raw-print.types.ts`](src/printers/raw-print.types.ts) — the
+  `RawPrintRequest`/`RawPrintResult` contract.
+- [`src/printers/raw-print.service.ts`](src/printers/raw-print.service.ts) —
+  the only entry point callers may use (`sendRawToPrinter()`). Routes never
+  call PowerShell or Windows APIs directly; they call this.
+- [`src/printers/windows-print.service.ts`](src/printers/windows-print.service.ts) —
+  isolated Windows implementation. If this approach doesn't hold up (see
+  limitations below), it's the only file that needs to change; the
+  `RawPrintRequest`/`RawPrintResult` contract and every caller stay the
+  same.
+- [`src/routes/diagnostics.routes.ts`](src/routes/diagnostics.routes.ts) —
+  `POST /diagnostics/raw-print`, a temporary, local-only diagnostic route.
+  **It must never be called by the web POS integration.**
+
+### Trying it locally
+
+```bash
+curl -X POST http://127.0.0.1:17777/diagnostics/raw-print \
+  -H "Content-Type: application/json" \
+  -d '{"printRole": "receipt", "mode": "escpos-text"}'
+```
+
+`mode` must currently be `"escpos-text"` — the only mode this spike
+implements. It builds a minimal ESC/POS buffer (initialize printer, print
+`RAW PRINT TEST` and a timestamp, feed a few lines, full cut) and sends it
+via the raw adapter to whatever printer is mapped to `printRole`.
+
+Validated before sending, in this order:
+
+- `printRole` is one of the [supported print roles](#supported-print-roles)
+  (`400 INVALID_PRINT_ROLE`).
+- `mode` is supported (`400 UNSUPPORTED_RAW_PRINT_MODE`).
+- `printRole` has a saved mapping in config (`400 PRINT_ROLE_NOT_CONFIGURED`).
+- the mapped printer is still installed, per a fresh `GET /printers`-style
+  lookup (`400 PRINTER_NOT_FOUND`).
+- the raw adapter itself succeeds (`502 RAW_PRINT_FAILED` if not — see next
+  section).
+
+### Known finding: spooler "success" does not mean the printer produced output
+
+Testing this against this machine's `Microsoft Print to PDF` printer
+surfaced a real limitation, not a hypothetical one. The sequence was:
+
+1. `POST /diagnostics/raw-print` returned `{"success": true, ...}`.
+2. Windows Event Viewer
+   (`Applications and Services Logs → Microsoft → Windows → PrintService → Operational`)
+   showed the job was actually rejected: *"A fatal error occurred while
+   printing job ... The print filter pipeline process was terminated.
+   Error information: 0x80070057."*
+3. A 0-byte PDF file appeared in the user's `Documents` folder, named after
+   the job — a placeholder Windows creates for a `PORTPROMPT:`-style port
+   when nothing interactive is available to answer the "Save As" dialog,
+   never actually written to because the print processor failed first.
+
+The reason: `Microsoft Print to PDF` uses the `MS_XPS_PROC` print
+processor, which only accepts XPS-formatted page data. Raw ESC_POS bytes
+are not a valid input for it, so it fails downstream of the spooler.
+
+The important part is *where* that failure happened: `WritePrinter` and
+`EndDocPrinter` — the Win32 calls `sendRawViaWindowsSpooler()` makes — both
+returned success. They only confirm the spooler *accepted the job into the
+queue*; rendering happens asynchronously afterward, outside those calls, so
+a downstream failure like this one is invisible to
+`POST /diagnostics/raw-print`'s response. **A `success: true` response
+means "the spooler accepted the raw bytes," not "the printer definitely
+produced physical output."**
+
+This is expected behavior for a GDI/XPS-based virtual printer, not a bug in
+the raw adapter — `RAW` datatype is meant for real thermal/label printers
+running ESC_POS/TSPL/ZPL (or a printer using the Windows "Generic / Text
+Only" driver), which accept raw bytes as their native input. This machine
+has no such printer attached, so end-to-end fidelity against real ESC/POS
+hardware (does the paper actually cut? does the drawer actually kick?)
+remains **unverified** — that's the next thing to test once real thermal
+hardware is available, not something this spike could prove either way.
+
+### Other known limitations of the PowerShell/P-Invoke approach
+
+- `OpenPrinterA` is the ANSI Win32 entry point, so printer names with
+  characters outside the current ANSI code page may not resolve correctly.
+- This has only been exercised from an interactive user session. Running
+  under a Windows Service account (WinSW, typically `LocalSystem`) may see
+  a different printer list or different permissions — not yet validated.
+- Each call pays a small `Add-Type` C# compile cost (sub-second on this
+  machine, but not free, and not something you'd want on a hot path).
+
+None of this required a native npm addon — the P/Invoke call is compiled
+by PowerShell itself via `Add-Type`, which is the standard technique for
+raw Windows printing from a script (the same approach behind the
+long-standing "RawPrinterHelper" class from Microsoft KB 322091). If it
+turns out not to hold up on real hardware, only
+`windows-print.service.ts` needs to be replaced — the `RawPrintRequest`/
+`RawPrintResult` contract in `raw-print.types.ts` and every caller of
+`sendRawToPrinter()` stay the same.
 
 ## Setup page
 
@@ -467,14 +782,16 @@ instead of the page.
 
 ## Currently implemented endpoints
 
-| Method | Path                       | Description                                               |
-| ------ | -------------------------- | --------------------------------------------------------- |
-| GET    | `/health`                  | Agent status, version, and per-role config state          |
-| GET    | `/printers`                | Windows printers currently installed on this machine      |
-| GET    | `/config`                  | Full current config for this machine                      |
-| POST   | `/config/printer-mappings` | Replace the printer mappings for this machine             |
-| GET    | `/setup`                   | Local HTML setup page (this agent's own UI, static files) |
-| POST   | `/test-print`              | Send a test print to a role's configured printer          |
+| Method | Path                       | Description                                                                  |
+| ------ | -------------------------- | ---------------------------------------------------------------------------- |
+| GET    | `/health`                  | Agent status, version, and per-role config state                             |
+| GET    | `/printers`                | Windows printers currently installed on this machine                         |
+| GET    | `/config`                  | Full current config for this machine                                         |
+| POST   | `/config/printer-mappings` | Replace the printer mappings for this machine                                |
+| GET    | `/setup`                   | Local HTML setup page (this agent's own UI, static files)                    |
+| POST   | `/test-print`              | Send a test print to a role's configured printer                             |
+| POST   | `/print`                   | Send a `PRINT_INSTRUCTIONS` print job, converted to ESC/POS internally        |
+| POST   | `/diagnostics/raw-print`   | Local-only diagnostic: send raw ESC_POS bytes to a role's configured printer |
 
 All error responses (from any route or unhandled exception) are shaped as:
 
@@ -609,21 +926,39 @@ machine image).
 Config and logs under `C:\ProgramData\Pinnacle\PosPrintAgent` are
 untouched by an upgrade.
 
-## What is intentionally not implemented yet
+## Current limitations
 
-This is a skeleton. The following are out of scope for this change and left
-for follow-up work:
+### Print instructions and rendering
 
-- Printing endpoints (`POST /print/receipt`, `POST /print/barcode-label`,
-  `POST /print/a4-invoice`).
+- Only `printRole: "receipt"` with `commandLanguage: "ESC_POS"` is
+  implemented — see [POST /print](#post-print).
+- `barcode-label`, `a4-invoice`, and `cash-drawer` are not implemented in
+  `/print` yet; sending them returns `PRINT_ROLE_NOT_IMPLEMENTED`.
+- `PDF` support will be added later as a separate `payloadType`, not as
+  part of `PRINT_INSTRUCTIONS`.
+- `barcode`, `qr`, `image`, `table`, and drawer-kick instruction types are
+  not implemented yet; sending them returns `INSTRUCTION_TYPE_NOT_IMPLEMENTED`.
+- Text encoding/code page handling is basic: the ESC/POS renderer only
+  emits plain ASCII (`0x20`–`0x7E`) and silently replaces anything outside
+  that range with `?`. No ESC/POS code-page-selection command is sent, so
+  currency symbols, accented characters, and non-Latin scripts are not
+  supported yet.
+- Every `cut` instruction adds a small fixed safety feed (3 lines) before
+  the cut bytes, on top of any explicit `feed` instructions already in the
+  payload — this can produce more blank space than expected if a payload
+  already fed generously before cutting.
+- Physical printer behavior (does the paper actually cut? does text render
+  correctly at 58mm vs 80mm width?) still requires testing against real
+  thermal hardware — everything so far has been verified against a
+  Generic / Text Only printer redirected to a file (see
+  [Testing with a Generic / Text Only printer mapped to a file](#testing-with-a-generic--text-only-printer-mapped-to-a-file)),
+  not physical paper.
+
+### Everything else
+
 - Cash drawer endpoint (`POST /cash-drawer/open`) — `POST /test-print` can
   send a text page to the printer feeding a drawer, but it does not send
   the raw ESC_POS kick command that actually opens one.
-- Raw ESC_POS/TSPL/ZPL byte printing and real receipt/label/invoice
-  rendering — `POST /test-print` proves the agent can reach a configured
-  printer through the normal Windows print pipeline, but production print
-  jobs (formatted receipts, barcode labels, PDF invoices) are not
-  implemented yet.
 - An endpoint to set `machineCode` at runtime (must still be edited by hand
   in `config.json`; the setup page shows it read-only for this reason).
 - Authentication/signing of requests from the web POS.

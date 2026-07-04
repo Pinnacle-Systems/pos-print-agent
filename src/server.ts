@@ -2,8 +2,10 @@ import express, { type Express } from "express";
 import { getConfig } from "./config/config.service";
 import { errorHandler } from "./errors/error-handler";
 import { createConfigRouter } from "./routes/config.routes";
+import { createDiagnosticsRouter } from "./routes/diagnostics.routes";
 import { createHealthRouter } from "./routes/health.routes";
 import { createPrintersRouter } from "./routes/printers.routes";
+import { createPrintRouter } from "./routes/print.routes";
 import { createSetupRouter } from "./routes/setup.routes";
 import { createTestPrintRouter } from "./routes/test-print.routes";
 
@@ -32,6 +34,8 @@ export function createServer(): Express {
   app.use(createConfigRouter());
   app.use(createSetupRouter());
   app.use(createTestPrintRouter());
+  app.use(createPrintRouter());
+  app.use(createDiagnosticsRouter());
 
   app.use(errorHandler);
 

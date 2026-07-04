@@ -131,15 +131,16 @@
         <fieldset class="role-fieldset">
           <legend>Cash Drawer</legend>
 
-          <div class="field">
-            <label for="cash-drawer-printer">Cash Drawer Printer</label>
-            <select id="cash-drawer-printer"></select>
-            <p class="field-warning hidden" id="cash-drawer-printer-warning"></p>
-          </div>
           <p class="field-hint">
-            Cash drawers are opened through a receipt printer's kick cable
-            using the ESC/POS command language.
+            Currently triggered through receipt printing using the
+            <code>openDrawer</code> instruction - there is no separate
+            cash-drawer print path yet.
           </p>
+
+          <div class="field">
+            <label for="cash-drawer-receipt-printer">Receipt Printer Used</label>
+            <input type="text" id="cash-drawer-receipt-printer" readonly />
+          </div>
         </fieldset>
 
         <div class="actions">
@@ -169,7 +170,7 @@
         <button type="button" class="btn btn-secondary test-btn" data-role="a4-invoice">
           Test A4 Print
         </button>
-        <button type="button" class="btn btn-secondary test-btn" data-role="cash-drawer">
+        <button type="button" class="btn btn-secondary test-btn" data-role="receipt">
           Test Cash Drawer
         </button>
       </div>

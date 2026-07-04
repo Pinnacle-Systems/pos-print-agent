@@ -50,17 +50,6 @@
       },
       applyExtra: function () {},
     },
-    {
-      key: "cash-drawer",
-      printerSelectId: "cash-drawer-printer",
-      warningId: "cash-drawer-printer-warning",
-      languageId: null,
-      defaultLanguage: "ESC_POS",
-      buildExtra: function () {
-        return {};
-      },
-      applyExtra: function () {},
-    },
   ];
 
   var state = {
@@ -177,6 +166,10 @@
     ROLES.forEach(populatePrinterSelect);
     document.getElementById("printers-loaded-hint").textContent =
       state.printers.length + " printer(s) found on this machine.";
+
+    var receiptMapping = state.config.printerMappings.receipt;
+    document.getElementById("cash-drawer-receipt-printer").value =
+      (receiptMapping && receiptMapping.windowsPrinterName) || "Not configured";
   }
 
   function buildPrinterMappingsPayload() {

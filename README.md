@@ -160,7 +160,14 @@ under `C:\ProgramData\Pinnacle\PosPrintAgent` if they don't already exist.
 npm run build
 ```
 
-Compiles TypeScript from `src/` to `dist/` using `tsc`.
+Compiles TypeScript from `src/` to `dist/` using `tsc`, copies the
+`/setup` static assets into `dist/setup-ui`
+([`scripts/copy-setup-ui.js`](scripts/copy-setup-ui.js)), and generates
+`dist/build-info.json` ([`scripts/generate-build-info.js`](scripts/generate-build-info.js))
+containing the current `package.json` version and the build timestamp —
+this is what `GET /health` and `GET /version` report (see
+[Calling /health](#calling-health) and
+[Calling /version](#calling-version) above).
 
 ```bash
 npm start
@@ -178,7 +185,9 @@ npm test            # vitest
 
 ## Calling /health
 
-Once running, verify the agent is alive:
+Once running, verify the agent is alive. This is the endpoint both the web
+POS (to check connectivity/capabilities before sending a print job) and
+support staff (to diagnose a counter) should call first:
 
 ```bash
 curl http://127.0.0.1:17777/health
@@ -193,10 +202,23 @@ Example response:
   "version": "1.0.0",
   "machineName": "COUNTER-01",
   "configured": true,
+  "paths": {
+    "configDir": "C:\\ProgramData\\Pinnacle\\PosPrintAgent",
+    "logDir": "C:\\ProgramData\\Pinnacle\\PosPrintAgent\\logs",
+    "tempDir": "C:\\ProgramData\\Pinnacle\\PosPrintAgent\\temp"
+  },
+  "capabilities": {
+    "receipt": { "supported": true, "commandLanguages": ["ESC_POS"], "payloadTypes": ["PRINT_INSTRUCTIONS"] },
+    "barcode-label": { "supported": true, "commandLanguages": ["TSPL"], "payloadTypes": ["PRINT_INSTRUCTIONS"] },
+    "a4-invoice": { "supported": true, "commandLanguages": ["PDF"], "payloadTypes": ["PDF"] },
+    "cash-drawer": { "supported": false, "note": "Use receipt PRINT_INSTRUCTIONS openDrawer instruction for now" }
+  },
   "printerMappings": {
     "receipt": {
       "configured": true,
-      "printerName": "EPSON TM-T82X Receipt"
+      "printerName": "EPSON TM-T82X Receipt",
+      "commandLanguage": "ESC_POS",
+      "printerInstalled": true
     },
     "barcode-label": {
       "configured": false
@@ -211,12 +233,51 @@ Example response:
 }
 ```
 
-Top-level `configured` is `true` only once the machine has a non-empty
-`machineCode` and at least one entry in `printerMappings`. The
-`printerMappings` object always lists all four
-[supported print roles](#supported-print-roles), each with its own
-`configured` flag, so a caller can tell at a glance which roles still need
-setup on this counter.
+Notes:
+
+- Top-level `configured` is `true` only once the machine has a non-empty
+  `machineCode` and at least one entry in `printerMappings`. The
+  `printerMappings` object always lists all four
+  [supported print roles](#supported-print-roles), each with its own
+  `configured` flag, so a caller can tell at a glance which roles still
+  need setup on this counter.
+- `capabilities` mirrors exactly what `POST /print` implements today (see
+  [`src/print-jobs/print-capabilities.ts`](src/print-jobs/print-capabilities.ts))
+  — a caller can check `capabilities["barcode-label"].supported` instead of
+  hardcoding assumptions about what this agent version can do.
+- `printerInstalled` is only present on a `printerMappings` entry once it
+  has a saved mapping, and reflects a live Windows printer-discovery check
+  made during this request. If that check itself fails (e.g. a transient
+  WMI/PowerShell error), `printerInstalled` is simply omitted rather than
+  failing the whole endpoint — `/health` never 500s just because one
+  printer is missing or discovery is briefly unavailable.
+- `version` is read from `package.json` at build time via a generated
+  `build-info.json` (see [Build](#build) below) — it is never hardcoded in
+  source, so it can't drift out of sync with an actual release.
+
+## Calling /version
+
+A lighter-weight endpoint for confirming exactly which build is running on
+a counter (useful when troubleshooting "did the upgrade actually apply?"):
+
+```bash
+curl http://127.0.0.1:17777/version
+```
+
+```json
+{
+  "agentName": "Pinnacle POS Print Agent",
+  "version": "1.0.0",
+  "buildTime": "2026-07-04T10:00:00.000Z",
+  "platform": "win32",
+  "arch": "x64"
+}
+```
+
+`buildTime` comes from the same generated `build-info.json` as `/health`'s
+`version` field; if that file isn't present yet (e.g. running `npm run dev`
+before any build has run), it falls back to `package.json`'s version and
+the process's own start time, rather than failing.
 
 ## Where config is stored
 

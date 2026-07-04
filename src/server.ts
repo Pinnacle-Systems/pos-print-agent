@@ -8,6 +8,7 @@ import { createPrintersRouter } from "./routes/printers.routes";
 import { createPrintRouter } from "./routes/print.routes";
 import { createSetupRouter } from "./routes/setup.routes";
 import { createTestPrintRouter } from "./routes/test-print.routes";
+import { createVersionRouter } from "./routes/version.routes";
 
 export function createServer(): Express {
   const app = express();
@@ -30,6 +31,7 @@ export function createServer(): Express {
   });
 
   app.use(createHealthRouter());
+  app.use(createVersionRouter());
   app.use(createPrintersRouter());
   app.use(createConfigRouter());
   app.use(createSetupRouter());

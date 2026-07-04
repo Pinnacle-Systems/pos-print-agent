@@ -136,4 +136,112 @@ describe("renderEscPosInstructions", () => {
     ]);
     expect(instructionCount).toBe(3);
   });
+
+  describe("barcode instruction", () => {
+    it("emits GS k with the CODE128 system code and {B-prefixed data", () => {
+      const { buffer } = render([{ type: "barcode", value: "INV1001", symbology: "CODE128" }]);
+      const body = buffer.subarray(2);
+      // align(3) + height(3) + width(3) + HRI(3) = 12 bytes before GS k.
+      const gsKIndex = 12;
+      expect(body.subarray(gsKIndex, gsKIndex + 3)).toEqual(Buffer.from([GS, 0x6b, 73]));
+      const dataLength = body[gsKIndex + 3];
+      const data = body.subarray(gsKIndex + 4, gsKIndex + 4 + dataLength).toString("ascii");
+      expect(data).toBe("{BINV1001");
+    });
+
+    it("emits GS k with the EAN13 system code and the raw digit value", () => {
+      const { buffer } = render([{ type: "barcode", value: "123456789012", symbology: "EAN13" }]);
+      const body = buffer.subarray(2);
+      const gsKIndex = 12;
+      expect(body.subarray(gsKIndex, gsKIndex + 3)).toEqual(Buffer.from([GS, 0x6b, 67]));
+      const dataLength = body[gsKIndex + 3];
+      const data = body.subarray(gsKIndex + 4, gsKIndex + 4 + dataLength).toString("ascii");
+      expect(data).toBe("123456789012");
+    });
+
+    it("rejects an EAN13 value that isn't 12-13 numeric digits", () => {
+      expect(() => render([{ type: "barcode", value: "123", symbology: "EAN13" }])).toThrow();
+      expect(() => render([{ type: "barcode", value: "12345678901234", symbology: "EAN13" }])).toThrow();
+      expect(() => render([{ type: "barcode", value: "12345678901A", symbology: "EAN13" }])).toThrow();
+    });
+
+    it("sets the barcode height via GS h n", () => {
+      const { buffer } = render([{ type: "barcode", value: "INV1001", height: 120 }]);
+      const body = buffer.subarray(2);
+      // align(3), then GS h n.
+      expect(body.subarray(3, 6)).toEqual(Buffer.from([GS, 0x68, 120]));
+    });
+
+    it("sets the barcode width via GS w n", () => {
+      const { buffer } = render([{ type: "barcode", value: "INV1001", width: 5 }]);
+      const body = buffer.subarray(2);
+      // align(3) + height(3), then GS w n.
+      expect(body.subarray(6, 9)).toEqual(Buffer.from([GS, 0x77, 5]));
+    });
+
+    it("sets the human-readable text position via GS H n", () => {
+      const { buffer } = render([{ type: "barcode", value: "INV1001", humanReadable: "both" }]);
+      const body = buffer.subarray(2);
+      // align(3) + height(3) + width(3), then GS H n.
+      expect(body.subarray(9, 12)).toEqual(Buffer.from([GS, 0x48, 3]));
+    });
+
+    it("resets alignment to left after the barcode and adds a trailing line feed", () => {
+      const { buffer } = render([{ type: "barcode", value: "INV1001", align: "center" }]);
+      expect(buffer.subarray(buffer.length - 4)).toEqual(Buffer.from([ESC, 0x61, 0x00, LF]));
+    });
+
+    it("applies the default height/width/humanReadable/align/symbology when omitted", () => {
+      const { buffer } = render([{ type: "barcode", value: "INV1001" }]);
+      const body = buffer.subarray(2);
+      expect(body.subarray(0, 3)).toEqual(Buffer.from([ESC, 0x61, 0x01])); // align center
+      expect(body.subarray(3, 6)).toEqual(Buffer.from([GS, 0x68, 80])); // height 80
+      expect(body.subarray(6, 9)).toEqual(Buffer.from([GS, 0x77, 2])); // width 2
+      expect(body.subarray(9, 12)).toEqual(Buffer.from([GS, 0x48, 2])); // humanReadable below
+    });
+  });
+
+  describe("qr instruction", () => {
+    it("emits the QR select-model, store, and print command bytes", () => {
+      const { buffer } = render([{ type: "qr", value: "https://example.com/i/1" }]);
+      const body = buffer.subarray(2);
+      // align(3), then select model.
+      expect(body.subarray(3, 12)).toEqual(Buffer.from([GS, 0x28, 0x6b, 0x04, 0x00, 0x31, 0x41, 0x32, 0x00]));
+      // print command should appear before the trailing align-reset + LF.
+      const printBytes = Buffer.from([GS, 0x28, 0x6b, 0x03, 0x00, 0x31, 0x51, 0x30]);
+      expect(body.includes(printBytes)).toBe(true);
+    });
+
+    it("sets the QR module size via GS ( k ... fn=67", () => {
+      const { buffer } = render([{ type: "qr", value: "https://example.com/i/1", size: 8 }]);
+      const body = buffer.subarray(2);
+      // align(3) + select-model(9), then module size.
+      expect(body.subarray(12, 20)).toEqual(Buffer.from([GS, 0x28, 0x6b, 0x03, 0x00, 0x31, 0x43, 8]));
+    });
+
+    it("sets the QR error correction level via GS ( k ... fn=69", () => {
+      const { buffer } = render([{ type: "qr", value: "https://example.com/i/1", errorCorrection: "H" }]);
+      const body = buffer.subarray(2);
+      // align(3) + select-model(9) + module-size(8), then error correction.
+      expect(body.subarray(20, 28)).toEqual(Buffer.from([GS, 0x28, 0x6b, 0x03, 0x00, 0x31, 0x45, 51]));
+    });
+
+    it("stores the QR data with a length-prefixed GS ( k ... fn=80 command", () => {
+      const value = "https://example.com/i/1";
+      const { buffer } = render([{ type: "qr", value }]);
+      const body = buffer.subarray(2);
+      // align(3) + select-model(9) + module-size(8) + error-correction(8) = 28.
+      const storeIndex = 28;
+      const storeLength = value.length + 3;
+      expect(body.subarray(storeIndex, storeIndex + 8)).toEqual(
+        Buffer.from([GS, 0x28, 0x6b, storeLength & 0xff, (storeLength >> 8) & 0xff, 0x31, 0x50, 0x30]),
+      );
+      expect(body.subarray(storeIndex + 8, storeIndex + 8 + value.length).toString("ascii")).toBe(value);
+    });
+
+    it("resets alignment to left after the QR code and adds a trailing line feed", () => {
+      const { buffer } = render([{ type: "qr", value: "https://example.com/i/1", align: "center" }]);
+      expect(buffer.subarray(buffer.length - 4)).toEqual(Buffer.from([ESC, 0x61, 0x00, LF]));
+    });
+  });
 });

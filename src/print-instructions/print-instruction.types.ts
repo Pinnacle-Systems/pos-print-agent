@@ -1,4 +1,5 @@
 import type {
+  BarcodeInstruction,
   BlankInstruction,
   CutInstruction,
   FeedInstruction,
@@ -7,10 +8,12 @@ import type {
   OpenDrawerInstruction,
   PrintInstruction,
   PrintInstructionsPayload,
+  QrInstruction,
   TextInstruction,
 } from "./print-instruction.schema";
 
 export type {
+  BarcodeInstruction,
   BlankInstruction,
   CutInstruction,
   FeedInstruction,
@@ -19,6 +22,7 @@ export type {
   OpenDrawerInstruction,
   PrintInstruction,
   PrintInstructionsPayload,
+  QrInstruction,
   TextInstruction,
 };
 

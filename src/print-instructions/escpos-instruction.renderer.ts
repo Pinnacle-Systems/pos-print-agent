@@ -1,6 +1,7 @@
 import type { z } from "zod";
-import { TextAlignSchema, TextSizeSchema } from "./print-instruction.schema";
+import { BarcodeHumanReadableSchema, BarcodeSymbologySchema, QrErrorCorrectionSchema, TextAlignSchema, TextSizeSchema } from "./print-instruction.schema";
 import type {
+  BarcodeInstruction,
   BlankInstruction,
   CutInstruction,
   FeedInstruction,
@@ -8,12 +9,16 @@ import type {
   LineInstruction,
   OpenDrawerInstruction,
   PrintInstructionsPayload,
+  QrInstruction,
   TextInstruction,
 } from "./print-instruction.schema";
 import type { RenderedEscPosPayload } from "./print-instruction.types";
 
 type TextAlign = z.infer<typeof TextAlignSchema>;
 type TextSize = z.infer<typeof TextSizeSchema>;
+type BarcodeSymbology = z.infer<typeof BarcodeSymbologySchema>;
+type BarcodeHumanReadable = z.infer<typeof BarcodeHumanReadableSchema>;
+type QrErrorCorrection = z.infer<typeof QrErrorCorrectionSchema>;
 
 const ESC = 0x1b;
 const GS = 0x1d;
@@ -35,6 +40,30 @@ const SIZE_CODES: Record<TextSize, number> = {
   "double-width": 0x10,
   "double-height": 0x01,
   double: 0x11,
+};
+
+// GS k function-B (newer, explicit-length) system codes. See README
+// "ESC/POS barcode command limitation" for why only these two are
+// implemented and how CODE128 code-set prefixing works.
+const BARCODE_SYSTEM_CODES: Record<BarcodeSymbology, number> = {
+  CODE128: 73,
+  EAN13: 67,
+};
+
+// GS H n: human-readable text position relative to the barcode.
+const HRI_POSITION_CODES: Record<BarcodeHumanReadable, number> = {
+  none: 0,
+  above: 1,
+  below: 2,
+  both: 3,
+};
+
+// GS ( k ... fn=69 (0x45) error-correction level codes.
+const QR_ERROR_CORRECTION_CODES: Record<QrErrorCorrection, number> = {
+  L: 48,
+  M: 49,
+  Q: 50,
+  H: 51,
 };
 
 /**
@@ -158,6 +187,94 @@ function renderOpenDrawerInstruction(_instruction: OpenDrawerInstruction): Buffe
   return escPosOpenDrawer();
 }
 
+function escPosBarcodeHeight(height: number): Buffer {
+  return Buffer.from([GS, 0x68, height]);
+}
+
+function escPosBarcodeWidth(width: number): Buffer {
+  return Buffer.from([GS, 0x77, width]);
+}
+
+function escPosBarcodeHri(position: BarcodeHumanReadable): Buffer {
+  return Buffer.from([GS, 0x48, HRI_POSITION_CODES[position]]);
+}
+
+/**
+ * Builds the raw data bytes for GS k (function B). EAN13 sends the digit
+ * string as-is (already validated to 12-13 numeric digits by the schema).
+ * CODE128 is prefixed with "{B" to select Code Set B, the common
+ * convention for encoding printable ASCII on Epson-compatible printers -
+ * see README "ESC/POS barcode command limitation" for why this is
+ * conservative rather than guaranteed across every printer model.
+ */
+function buildBarcodeData(instruction: BarcodeInstruction): string {
+  if (instruction.symbology === "CODE128") {
+    return `{B${toAsciiSafe(instruction.value)}`;
+  }
+  return instruction.value;
+}
+
+// GS k m n d1...dn (function B / explicit length form).
+function escPosBarcodePrint(instruction: BarcodeInstruction): Buffer {
+  const data = Buffer.from(buildBarcodeData(instruction), "ascii");
+  return Buffer.concat([Buffer.from([GS, 0x6b, BARCODE_SYSTEM_CODES[instruction.symbology], data.length]), data]);
+}
+
+function renderBarcodeInstruction(instruction: BarcodeInstruction): Buffer {
+  return Buffer.concat([
+    escPosAlign(instruction.align),
+    escPosBarcodeHeight(instruction.height),
+    escPosBarcodeWidth(instruction.width),
+    escPosBarcodeHri(instruction.humanReadable),
+    escPosBarcodePrint(instruction),
+    escPosAlign("left"),
+    Buffer.from([LF]),
+  ]);
+}
+
+// GS ( k 04 00 31 41 n1 n2 - fixed to QR model 2 (the common default
+// supported by virtually all ESC/POS QR-capable printers).
+function escPosQrSelectModel(): Buffer {
+  return Buffer.from([GS, 0x28, 0x6b, 0x04, 0x00, 0x31, 0x41, 0x32, 0x00]);
+}
+
+// GS ( k 03 00 31 43 n - module size (dots per module).
+function escPosQrModuleSize(size: number): Buffer {
+  return Buffer.from([GS, 0x28, 0x6b, 0x03, 0x00, 0x31, 0x43, size]);
+}
+
+// GS ( k 03 00 31 45 n - error correction level.
+function escPosQrErrorCorrection(level: QrErrorCorrection): Buffer {
+  return Buffer.from([GS, 0x28, 0x6b, 0x03, 0x00, 0x31, 0x45, QR_ERROR_CORRECTION_CODES[level]]);
+}
+
+// GS ( k pL pH 31 50 30 d1...dk - store QR data. pL/pH encode (data length + 3).
+function escPosQrStoreData(value: string): Buffer {
+  const data = Buffer.from(toAsciiSafe(value), "ascii");
+  const storeLength = data.length + 3;
+  const pL = storeLength & 0xff;
+  const pH = (storeLength >> 8) & 0xff;
+  return Buffer.concat([Buffer.from([GS, 0x28, 0x6b, pL, pH, 0x31, 0x50, 0x30]), data]);
+}
+
+// GS ( k 03 00 31 51 30 - print the stored QR code.
+function escPosQrPrint(): Buffer {
+  return Buffer.from([GS, 0x28, 0x6b, 0x03, 0x00, 0x31, 0x51, 0x30]);
+}
+
+function renderQrInstruction(instruction: QrInstruction): Buffer {
+  return Buffer.concat([
+    escPosAlign(instruction.align),
+    escPosQrSelectModel(),
+    escPosQrModuleSize(instruction.size),
+    escPosQrErrorCorrection(instruction.errorCorrection),
+    escPosQrStoreData(instruction.value),
+    escPosQrPrint(),
+    escPosAlign("left"),
+    Buffer.from([LF]),
+  ]);
+}
+
 export function renderEscPosInstructions(payload: PrintInstructionsPayload): RenderedEscPosPayload {
   const parts: Buffer[] = [escPosInit()];
 
@@ -183,6 +300,12 @@ export function renderEscPosInstructions(payload: PrintInstructionsPayload): Ren
         break;
       case "openDrawer":
         parts.push(renderOpenDrawerInstruction(instruction));
+        break;
+      case "barcode":
+        parts.push(renderBarcodeInstruction(instruction));
+        break;
+      case "qr":
+        parts.push(renderQrInstruction(instruction));
         break;
     }
   }

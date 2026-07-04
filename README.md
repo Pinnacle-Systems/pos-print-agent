@@ -450,6 +450,8 @@ implemented by this endpoint yet — see
 | `leftRight`  | `left` (string, required, ≤250 chars), `right` (string, required, ≤100 chars), `bold`/`underline`/`size` (same defaults as `text`) |
 | `blank`      | `lines` (1–5, default `1`) |
 | `openDrawer` | no fields |
+| `barcode`    | `value` (string, required, ≤80 chars), `symbology` (`CODE128`\|`EAN13`, default `CODE128`), `height` (40–160, default `80`), `width` (2–6, default `2`), `humanReadable` (`none`\|`above`\|`below`\|`both`, default `below`), `align` (default `center`) |
+| `qr`         | `value` (string, required, ≤500 chars), `size` (3–10, default `6`), `errorCorrection` (`L`\|`M`\|`Q`\|`H`, default `M`), `align` (default `center`) |
 
 `payload.width` (default `42`, must be 32–48) sets both the `line`
 character count and is otherwise informational for the caller — it does
@@ -521,6 +523,63 @@ wanting this exact pulse timing — that still requires testing with real
 drawer hardware connected to the configured receipt printer; nothing here
 has been verified against a physical drawer.
 
+##### barcode — 1D barcodes (invoice/return/token references)
+
+`barcode` prints a one-dimensional barcode, for whatever reference the
+POS/backend decides to encode (invoice number, return lookup, token
+number, customer reference, ...). The agent has no idea what the value
+*means* — it just encodes whatever string it's given.
+
+```json
+{
+  "type": "barcode",
+  "value": "INV1001",
+  "symbology": "CODE128",
+  "height": 80,
+  "width": 2,
+  "humanReadable": "below",
+  "align": "center"
+}
+```
+
+Supported `symbology` values (this prompt only):
+
+- `CODE128` (default) — general-purpose alphanumeric barcode. The
+  renderer prefixes the value with `{B` to select Code Set B, so it
+  covers the same printable-ASCII range as `text`/`leftRight` (see
+  [ESC/POS barcode command limitation](#escpos-barcode-command-limitation)).
+- `EAN13` — the retail 12/13-digit barcode. `value` must be exactly 12
+  or 13 numeric digits or the job is rejected with
+  `INVALID_PRINT_PAYLOAD` before anything is sent to the printer.
+
+`height` (40–160, default `80`) and `width` (2–6, default `2`) are raw
+ESC/POS dot-based parameters, not physical units — larger values make a
+taller/wider barcode but exact millimeters depend on printer DPI.
+`humanReadable` controls whether the encoded text is printed as
+readable characters `above`/`below`/`both` the bars, or `none` at all.
+
+##### qr — QR codes (payment/URL/loyalty links)
+
+`qr` prints a QR code, for whatever the POS/backend wants scanned
+(payment QR, online invoice URL, return verification link, loyalty/
+customer link, ...) — again, the agent only encodes the string.
+
+```json
+{
+  "type": "qr",
+  "value": "https://example.com/invoice/INV-1001",
+  "size": 6,
+  "errorCorrection": "M",
+  "align": "center"
+}
+```
+
+`size` (3–10, default `6`) is the QR module size in printer dots per
+module — larger values produce a bigger, easier-to-scan code at the cost
+of paper width. `errorCorrection` (`L`\|`M`\|`Q`\|`H`, default `M`) trades
+scan robustness against damage/dirt for QR code density; `H` survives
+more physical damage but packs less data into the same size.
+
 ##### Example request (PRINT_INSTRUCTIONS)
 
 ```bash
@@ -586,6 +645,15 @@ conservative, well-documented ESC/POS command set:
 | `LF`      | `0A`          | Line feed                          |
 | `GS V m`  | `1D 56 m`     | Paper cut: full(0)/partial(1)        |
 | `ESC p m t1 t2` | `1B 70 00 19 FA` | Cash drawer kick (fixed pulse, see below) |
+| `GS h n`  | `1D 68 n`     | Barcode height (dots)               |
+| `GS w n`  | `1D 77 n`     | Barcode width (module multiplier)    |
+| `GS H n`  | `1D 48 n`     | Barcode human-readable text position: none(0)/above(1)/below(2)/both(3) |
+| `GS k m n d1...dn` | `1D 6B m n ...` | Print barcode: CODE128(m=73)/EAN13(m=67), explicit-length form |
+| `GS ( k ... fn=65` | `1D 28 6B 04 00 31 41 32 00` | Select QR model (fixed to model 2) |
+| `GS ( k ... fn=67` | `1D 28 6B 03 00 31 43 n` | Set QR module size |
+| `GS ( k ... fn=69` | `1D 28 6B 03 00 31 45 n` | Set QR error correction level |
+| `GS ( k ... fn=80` | `1D 28 6B pL pH 31 50 30 ...` | Store QR data (length-prefixed) |
+| `GS ( k ... fn=81` | `1D 28 6B 03 00 31 51 30` | Print the stored QR code |
 
 Each `text` and `leftRight` instruction resets bold/underline/size back to
 defaults after its line (and `text` additionally resets alignment), so
@@ -595,7 +663,10 @@ explicit `feed` instructions the payload already included — see
 [Current limitations](#current-limitations) for why. `blank` renders as
 plain `LF` bytes, identical to `feed` — see
 [blank vs feed](#blank-vs-feed) above for why they're still separate
-instruction types.
+instruction types. Both `barcode` and `qr` set alignment before printing
+and reset it back to `left` afterward, followed by a trailing line feed —
+see [barcode](#barcode--1d-barcodes-invoicereturntoken-references) and
+[qr](#qr--qr-codes-paymenturlloyalty-links) above.
 
 ###### ESC/POS drawer command limitation
 
@@ -608,6 +679,26 @@ substituted later without touching anything else. See
 [openDrawer](#opendrawer) above for the "never opens automatically" rule,
 and [Current limitations](#current-limitations) for hardware-testing
 status.
+
+###### ESC/POS barcode command limitation
+
+`barcode` uses the "function B" (explicit-length) form of `GS k`, and for
+`CODE128` prefixes the value with `{B` to select Code Set B. This is a
+conservative, widely-used convention on Epson-compatible printers, but
+**barcode command support and the exact prefixing convention vary across
+ESC/POS printer models** — some clones interpret the function-B length
+byte or the `{`-prefix differently. `EAN13` is comparatively low-risk (no
+prefixing, industry-standard 12/13-digit encoding), but `CODE128` output
+should be scanned with real hardware before depending on it in
+production. See [Current limitations](#current-limitations).
+
+###### ESC/POS QR command limitation
+
+QR support uses the Epson "GS ( k" custom-function command set (model 2,
+fixed), which is broadly supported on Epson and Epson-compatible thermal
+printers but, like barcodes, **is not universal across every ESC/POS
+printer model** — some cheaper/generic printers don't implement QR at
+all. See [Current limitations](#current-limitations).
 
 The rendered `Buffer` is sent through the exact same raw print adapter
 used by `POST /diagnostics/raw-print` (`sendRawToPrinter()` in
@@ -635,6 +726,55 @@ To verify end to end without real thermal hardware:
    ```
    You should see `1B 40` (init) at the start, your receipt text as
    readable ASCII in the middle, and `1D 56 00` (full cut) near the end.
+
+##### Testing barcode and QR printing
+
+Same file-redirected setup as above. Send a payload with `barcode` and/or
+`qr` instructions:
+
+```bash
+curl -X POST http://127.0.0.1:17777/print \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jobId": "INV-1003",
+    "printRole": "receipt",
+    "commandLanguage": "ESC_POS",
+    "payloadType": "PRINT_INSTRUCTIONS",
+    "copies": 1,
+    "payload": {
+      "width": 42,
+      "instructions": [
+        { "type": "text", "value": "MY STORE", "align": "center", "bold": true },
+        { "type": "leftRight", "left": "Invoice", "right": "INV-1003" },
+        { "type": "line" },
+        { "type": "leftRight", "left": "Grand Total", "right": "1300.00", "bold": true },
+        { "type": "blank", "lines": 1 },
+        { "type": "barcode", "value": "INV1003", "symbology": "CODE128", "height": 80, "width": 2, "humanReadable": "below", "align": "center" },
+        { "type": "blank", "lines": 1 },
+        { "type": "qr", "value": "https://example.com/invoice/INV-1003", "size": 6, "errorCorrection": "M", "align": "center" },
+        { "type": "feed", "lines": 4 },
+        { "type": "cut" }
+      ]
+    }
+  }'
+```
+
+Then inspect the `.prn` file the same way:
+
+```powershell
+Format-Hex C:\Temp\raw-printer-output.prn
+```
+
+You should see `1D 6B 49 ...` (`GS k` with CODE128's system code 73/0x49,
+followed by a length byte and the `{B`-prefixed value) for the barcode,
+and a run of `1D 28 6B ...` (`GS ( k`) commands for the QR code — select
+model, module size, error correction, store data, then print.
+
+**This only proves the command bytes are correct** — a file-redirected
+Generic / Text Only printer cannot render or scan a barcode/QR image.
+Confirming the barcode actually scans and the QR actually decodes
+requires printing to real thermal hardware and testing with a barcode
+scanner / phone camera.
 
 #### PDF (a4-invoice)
 
@@ -762,7 +902,7 @@ types:
 | `UNSUPPORTED_COMMAND_LANGUAGE`     | both                   | Requested `commandLanguage` doesn't match this role's configured mapping.                  |
 | `UNSUPPORTED_PAYLOAD_TYPE`         | both                   | `payloadType` isn't `"PRINT_INSTRUCTIONS"` or `"PDF"` (e.g. `RAW_COMMAND`).                 |
 | `PRINT_ROLE_NOT_IMPLEMENTED`       | both                   | This `printRole`/`payloadType` combination isn't implemented (e.g. PDF for `receipt`).      |
-| `INSTRUCTION_TYPE_NOT_IMPLEMENTED` | PRINT_INSTRUCTIONS     | An instruction's `type` isn't one of `text`/`line`/`feed`/`cut`.                            |
+| `INSTRUCTION_TYPE_NOT_IMPLEMENTED` | PRINT_INSTRUCTIONS     | An instruction's `type` isn't one of `text`/`line`/`feed`/`cut`/`leftRight`/`blank`/`openDrawer`/`barcode`/`qr`. |
 | `PRINT_QUEUE_FAILED`               | PRINT_INSTRUCTIONS     | Validation passed but the raw print adapter failed to deliver the rendered bytes.           |
 | `UNSUPPORTED_PAYLOAD_ENCODING`     | PDF                    | `payloadEncoding` isn't `"base64"`.                                                         |
 | `PDF_DECODE_FAILED`                | PDF                    | `payload` isn't valid base64.                                                               |
@@ -1186,10 +1326,17 @@ untouched by an upgrade.
   [POST /print](#post-print).
 - `barcode-label` and `cash-drawer` are not implemented in `/print` yet;
   sending them returns `PRINT_ROLE_NOT_IMPLEMENTED`.
-- `barcode` and `qr` instruction types are intentionally not implemented
-  yet — they need printer-specific testing (symbology support, module
-  size) that's out of scope until that's done; `image` and `table` are
-  also not implemented. Sending any of these returns
+- `barcode` (`CODE128`/`EAN13` only) and `qr` instruction types are
+  implemented, but ESC/POS barcode/QR command support and conventions
+  (e.g. CODE128 code-set prefixing) vary across printer models — see
+  [ESC/POS barcode command limitation](#escpos-barcode-command-limitation)
+  and [ESC/POS QR command limitation](#escpos-qr-command-limitation).
+  Real scannability has only been verified as correct command bytes
+  against a file-redirected printer (see
+  [Testing barcode and QR printing](#testing-barcode-and-qr-printing)),
+  not against a physical scanner or thermal hardware. `image` and `table`
+  instruction types, and TSPL/ZPL barcode-label printing, are not
+  implemented. Sending any unimplemented instruction type returns
   `INSTRUCTION_TYPE_NOT_IMPLEMENTED`.
 - Text encoding/code page handling is basic: the ESC/POS renderer only
   emits plain ASCII (`0x20`–`0x7E`) and silently replaces anything outside

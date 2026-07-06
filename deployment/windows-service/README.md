@@ -163,7 +163,7 @@ locations (beside `PosPrintAgent.exe`, or the `sumatraPdfPath` override in
 ### Troubleshooting service account printer access issues
 
 The Windows service runs as whatever account WinSW is configured for
-(typically `LocalSystem` unless changed in `PosPrintAgentService.xml`).
+(`LocalSystem` by default, unless changed in `PosPrintAgentService.xml`).
 That account needs its own access to the target printer — it does not
 inherit the printers visible to whichever user is logged into the
 counter interactively.
@@ -172,15 +172,91 @@ counter interactively.
   running**, not just when you tested manually from an interactive
   PowerShell/`npm run dev` session — the printer list can differ between
   the two.
-- Local USB printers are the primary MVP target and are generally visible
-  to `LocalSystem`. Network printers may require the service to run under
-  a domain/local account that has been granted access to that printer
-  share, rather than `LocalSystem`.
+- Network printers may require the service to run under a domain/local
+  account that has been granted access to that printer share, rather than
+  `LocalSystem`.
 - If `GET /printers` doesn't list the expected printer under the service
   account, that's a Windows printer-permissions problem, not something
   `PosPrintAgent.exe` can work around — grant the service account access
   to the printer (or run the service as a different account) before
   retrying.
+
+#### Confirmed finding: raw ESC_POS/TSPL printing hangs under LocalSystem
+
+Unlike the general visibility issue above, this is a **confirmed, reproduced
+failure**, not just a theoretical risk: `POST /print` (real receipt/label
+printing, which delivers raw bytes via `WritePrinter` — see root README's
+[Why the setup page mostly tests via POST /print, not POST /test-print](../../README.md#why-the-setup-page-mostly-tests-via-post-print-not-post-test-print))
+can report `success: true` from the agent while the underlying Windows
+print job never actually completes, when the service runs as `LocalSystem`.
+
+Symptoms:
+
+- The agent logs `success: true` and a correct `renderedPayloadSizeBytes`.
+- `Get-PrintJob` shows the job stuck as `Error, Printing, Retained` with
+  `Size: 0`, and it never clears on its own.
+- The exact same request works instantly and correctly when run
+  interactively (e.g. via `npm run dev`, or the packaged exe run directly
+  by double-clicking it) instead of through the installed service.
+
+This is a `LocalSystem`/Session 0 isolation issue, not a bug in the raw
+print P/Invoke code itself, and it reproduces even against a purely local
+USB-class printer, not just network printers.
+
+**Fix: run the service as a real local user account instead of
+`LocalSystem`.**
+
+1. Decide on an account: either create a dedicated local service account,
+   or reuse an existing local account. A dedicated account is more robust
+   for an unattended counter (its password won't rotate out from under the
+   service the way a staff member's login password might), but reusing an
+   existing account is simpler if this is just for testing:
+
+   ```powershell
+   # Only if creating a dedicated account:
+   $password = Read-Host -AsSecureString "Set a password for the service account"
+   New-LocalUser -Name "PosPrintAgentSvc" -Password $password -PasswordNeverExpires -UserMayNotChangePassword
+   Add-LocalGroupMember -Group "Users" -Member "PosPrintAgentSvc"
+   ```
+
+2. Add a `<serviceaccount>` block to `PosPrintAgentService.xml`, before
+   `</service>` (a commented-out template is already in this file — copy it
+   out and fill in real values, never commit real credentials to source
+   control):
+
+   ```xml
+   <serviceaccount>
+     <domain>.</domain>
+     <user>your-local-username</user>
+     <password>your-password</password>
+     <allowservicelogon>true</allowservicelogon>
+   </serviceaccount>
+   ```
+
+   Use a literal `.` for `<domain>` (the standard Windows convention for
+   "look this account up on the local machine"), not `%COMPUTERNAME%` —
+   WinSW does not expand that placeholder in this field, and passing it
+   through literally fails service install with `FATAL - Failed to find
+   the account. No mapping between account names and security IDs was
+   done.`
+
+3. Reinstall the service so WinSW picks up the account change:
+
+   ```powershell
+   .\uninstall-service.bat
+   .\install-service.bat
+   ```
+
+   WinSW normally grants "Log on as a service" to the account automatically
+   during install. If install fails specifically citing that right, grant
+   it manually via `secpol.msc` → Local Policies → User Rights Assignment
+   → "Log on as a service" → add the account.
+
+4. Confirm the fix: `Get-CimInstance Win32_Service -Filter
+   "Name='PinnaclePosPrintAgent'" | Select StartName` should show the new
+   account, and a real `POST /print` receipt job should complete cleanly
+   (`Get-PrintJob` returns nothing once it's done, instead of a stuck
+   `Error` entry).
 
 ## Upgrading the agent
 

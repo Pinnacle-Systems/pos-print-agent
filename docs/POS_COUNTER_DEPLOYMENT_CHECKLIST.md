@@ -290,6 +290,18 @@ curl -X POST http://127.0.0.1:17777/print \
   drawer-kick port (RJ11/RJ12), and that the printer itself supports a
   drawer kick pulse. Also confirm `openDrawer` was actually included in
   the payload sent.
+- Agent responds `"success": true` but nothing prints, and
+  `Get-PrintJob -PrinterName "<printer>"` shows the job stuck as
+  `Error, Printing, Retained` with `Size: 0` → this is a confirmed issue
+  with the Windows service running as the default `LocalSystem` account,
+  not a printer problem. Fix: configure the service to run as a real local
+  user account instead — see
+  [Troubleshooting service account printer access issues](../deployment/windows-service/README.md#troubleshooting-service-account-printer-access-issues).
+  Quick way to confirm this is the cause before changing anything: retest
+  the exact same request while running the agent interactively
+  (`npm run dev`, or double-click the packaged exe) instead of through the
+  installed service — if it works interactively but not as the service,
+  this is it.
 
 ---
 
@@ -346,6 +358,10 @@ Invoke-RestMethod -Uri http://127.0.0.1:17777/print -Method Post `
   loaded in the printer.
 - Barcode doesn't scan → try adjusting `narrow`/`wide` module widths or
   `height`; very small/dense barcodes are harder for some scanners to read.
+- `"success": true` but nothing prints and the job is stuck in the Windows
+  print queue with `Size: 0` → same `LocalSystem` service account issue as
+  the receipt test above (TSPL is also delivered as raw bytes). See
+  [Section 7's troubleshooting](#7-real-receipt-printer-test) for the fix.
 
 ---
 
@@ -423,6 +439,18 @@ Expected:
 Status    : Running
 StartType : Automatic
 ```
+
+Also check which account it's running as — this matters for printing, not
+just for the check itself:
+
+```powershell
+Get-CimInstance Win32_Service -Filter "Name='PinnaclePosPrintAgent'" | Select-Object StartName
+```
+
+If this counter does receipt or barcode-label printing (raw ESC_POS/TSPL
+bytes) and `StartName` is `LocalSystem`, configure a real local service
+account **before** running the hardware tests in Sections 7-8 — see
+[Confirmed finding: raw ESC_POS/TSPL printing hangs under LocalSystem](../deployment/windows-service/README.md#confirmed-finding-raw-esc_postspl-printing-hangs-under-localsystem).
 
 **Restart test** — confirms the service survives a stop/start cycle
 cleanly (not just that the initial install worked):

@@ -17,4 +17,21 @@
   <onfailure action="restart" delay="10 sec" />
   <onfailure action="restart" delay="30 sec" />
   <onfailure action="none" />
+
+  <!--
+    By default this service runs as LocalSystem, which cannot reliably
+    complete raw ESC_POS/TSPL print jobs (see "Troubleshooting service
+    account printer access issues" in this folder's README.md, and the
+    root README.md's "Known finding: raw printing hangs under the
+    LocalSystem service account"). Uncomment and fill in a real local
+    account below before installing on a counter that does receipt/label
+    printing - never commit real credentials here.
+
+  <serviceaccount>
+    <domain>.</domain>
+    <user>REPLACE_WITH_LOCAL_USERNAME</user>
+    <password>REPLACE_WITH_PASSWORD</password>
+    <allowservicelogon>true</allowservicelogon>
+  </serviceaccount>
+  -->
 </service>

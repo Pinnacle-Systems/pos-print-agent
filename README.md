@@ -1337,9 +1337,19 @@ hardware is available, not something this spike could prove either way.
 
 - `OpenPrinterA` is the ANSI Win32 entry point, so printer names with
   characters outside the current ANSI code page may not resolve correctly.
-- This has only been exercised from an interactive user session. Running
-  under a Windows Service account (WinSW, typically `LocalSystem`) may see
-  a different printer list or different permissions — not yet validated.
+- **Confirmed finding, not just a risk:** raw printing via this mechanism
+  hangs when the agent runs as the Windows service under the default
+  `LocalSystem` account — `OpenPrinter`/`StartDocPrinter`/`WritePrinter`
+  all report success and the agent logs `success: true`, but the
+  underlying Windows print job never completes (`Get-PrintJob` shows it
+  stuck as `Error, Printing, Retained` with `Size: 0`). The exact same
+  request works instantly when run interactively (`npm run dev`, or the
+  packaged exe run directly). This is a `LocalSystem`/Session 0 isolation
+  issue, reproduced even against a purely local printer. **Fix:** configure
+  WinSW to run the service as a real local user account instead of
+  `LocalSystem` — see
+  [Troubleshooting service account printer access issues](deployment/windows-service/README.md#troubleshooting-service-account-printer-access-issues)
+  in the deployment README for the exact `<serviceaccount>` XML and steps.
 - Each call pays a small `Add-Type` C# compile cost (sub-second on this
   machine, but not free, and not something you'd want on a hot path).
 
@@ -1734,7 +1744,12 @@ actual printer hardware.
   for larger print runs.
 - Network printer behavior under a Windows service account is unverified —
   see [deployment/windows-service/README.md](deployment/windows-service/README.md#troubleshooting-service-account-printer-access-issues).
-  Local USB printers are the primary MVP target.
+  Local USB printers are the primary MVP target. Note that raw ESC_POS/TSPL
+  printing (not PDF) has a *confirmed* `LocalSystem` service account issue
+  with a documented fix — see
+  [Other known limitations of the PowerShell/P-Invoke approach](#other-known-limitations-of-the-powershellp-invoke-approach)
+  above; the same fix (running the service as a real user account) is worth
+  trying first if PDF printing under the service account also misbehaves.
 - Only tested so far via a real Windows print pipeline in general; PDF
   printing specifically still needs verification against SumatraPDF once a
   copy of it and a real (or virtual) A4 printer are available in this

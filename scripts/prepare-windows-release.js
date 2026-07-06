@@ -393,6 +393,27 @@ file (see the root project README's "Testing barcode-label printing with
 a Generic / Text Only printer mapped to a file") and inspect the raw TSPL
 text.
 
+### Receipt/label print reports success but nothing prints (job stuck in the Windows print queue)
+
+Check the printer's queue (double-click it in **Settings > Printers &
+Scanners**, or \`Get-PrintJob -PrinterName "<printer>"\`). If a job is stuck
+as \`Error, Printing, Retained\` with \`Size: 0\` even though the agent
+reported \`success: true\`, this is a confirmed issue with the service
+running as the default \`LocalSystem\` account - raw ESC_POS/TSPL bytes get
+accepted but never actually delivered when running as \`LocalSystem\`,
+even against a purely local printer. It is not a printer or cabling
+problem. Confirm by testing the same request while running the agent
+interactively instead of as a service (e.g. double-click
+\`PosPrintAgent.exe\` directly) - if it works there but not as the service,
+this is it.
+
+Fix: edit \`PosPrintAgentService.xml\` and add a \`<serviceaccount>\` block
+(a commented-out template is already in the file) pointing at a real local
+Windows account instead of \`LocalSystem\`, then run \`uninstall-service.bat\`
+followed by \`install-service.bat\` again so WinSW picks up the change. Use
+a literal \`.\` for \`<domain>\`, not \`%COMPUTERNAME%\` (WinSW does not
+expand that placeholder in this field).
+
 ### PDF_PRINT_TOOL_NOT_FOUND
 
 \`SumatraPDF.exe\` was not found. Confirm it is literally in this folder

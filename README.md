@@ -487,9 +487,7 @@ on Windows it writes a short text file and pipes it through PowerShell's
 approach as printer discovery), so it goes through the real Windows print
 spooler. This confirms the agent can reach the configured printer end to
 end; it is **not** raw ESC_POS/TSPL/ZPL byte printing, and it does not open
-a cash drawer. Production receipt printing is `POST /print` (below); cash
-drawer opening remains future work (see
-[Current limitations](#current-limitations)).
+a cash drawer.
 
 Errors:
 
@@ -501,6 +499,47 @@ Errors:
 - `502 TEST_PRINT_FAILED` — the mapped printer exists in config but
   Windows/PowerShell couldn't spool a job to it (e.g. printer removed,
   offline, or a permissions issue).
+
+### Why the setup page mostly tests via POST /print, not POST /test-print
+
+The setup page's **Test Receipt**, **Test Barcode**, and **Test Cash
+Drawer** buttons send a real, minimal job through `POST /print` — the same
+path production printing uses — instead of `POST /test-print`. Only **Test
+A4** still uses `POST /test-print`.
+
+The reason is a real, observed failure, not a hypothetical one:
+`Out-Printer` always renders through the normal Windows GDI pipeline,
+submitting the job with datatype `NT EMF`, regardless of which printer or
+driver it's pointed at. Most printer drivers accept that. But the
+[Generic / Text Only driver + file port technique](#testing-with-a-generic--text-only-printer-mapped-to-a-file)
+this README recommends for testing ESC_POS/TSPL output without real
+thermal hardware only accepts `RAW` datatype — sending it an `NT EMF` job
+fails downstream with **Win32 error 50 ("The request is not supported")**,
+visible in Windows Event Viewer
+(`Applications and Services Logs → Microsoft → Windows → PrintService →
+Admin`) as a failed print job, even though nothing about the setup itself
+was wrong. This is the same class of issue as the
+[Known finding](#known-finding-spooler-success-does-not-mean-the-printer-produced-output)
+below (spooler-accepted-but-processor-rejected), just a different driver
+and error code.
+
+`POST /print` doesn't have this problem — it sends ESC_POS/TSPL bytes
+directly via `WritePrinter` with `RAW` datatype (the same path
+`sendRawToPrinter()` always uses), which both real thermal hardware and a
+Generic/Text-Only file-port printer accept. As a side benefit, testing
+through the real path means **Test Cash Drawer** now sends an actual
+`openDrawer` ESC/POS kick command instead of being unable to (GDI text
+rendering, which `Out-Printer` uses, cannot pass ESC/POS control bytes
+through — see the "Cannot do" row in the
+[Raw Printing Diagnostic](#raw-printing-diagnostic) comparison table).
+
+**Test A4** stays on `POST /test-print` deliberately: it's a plain
+connectivity check that works without `SumatraPDF.exe` present, whereas a
+real `POST /print` PDF job requires it (see
+[SumatraPDF requirement](#sumatrapdf-requirement)). A4 invoice printers
+are also typically real Windows-native drivers (or `Microsoft Print to
+PDF`), not the Generic/Text-Only + file port setup that triggers this
+issue, so `Out-Printer`'s GDI rendering isn't a problem for that role.
 
 ### POST /print
 
@@ -1214,7 +1253,7 @@ printing paths, and they answer different questions. In short:
 | Goes through | The normal Windows GDI print pipeline (the same path a Word document takes) | The spooler's raw datatype, bypassing GDI text rendering entirely |
 | Proves | The agent can reach the printer and Windows can spool *a* job to it | Raw ESC_POS/TSPL/ZPL command bytes can be delivered to the printer largely unmodified |
 | Cannot do | Send raw ESC_POS commands (paper cut, cash-drawer kick) — GDI text rendering does not pass control bytes through | Reliably work against printers/drivers that don't accept `RAW` datatype (see finding below) |
-| Used for | The setup page's "Test Receipt/Barcode/A4/Cash Drawer" buttons | Local development/support diagnostics only |
+| Used for | The setup page's "Test A4" button only (see [Why the setup page mostly tests via POST /print, not POST /test-print](#why-the-setup-page-mostly-tests-via-post-print-not-post-test-print)) | Local development/support diagnostics only |
 
 Implementation:
 
@@ -1340,11 +1379,14 @@ troubleshooting that counter's printers.
   manual JSON editing.
 - Warns inline if a previously-configured printer is no longer installed
   (e.g. it was unplugged or renamed in Windows).
-- Has "Test Receipt/Barcode/A4/Cash Drawer" buttons wired to
-  `POST /test-print`, which sends a short text page to that role's
-  configured printer to confirm the agent can reach it (see
-  [POST /test-print](#post-test-print) below). A role must be saved before
-  it can be tested.
+- Has "Test Receipt/Barcode/A4/Cash Drawer" buttons. **Test Receipt**,
+  **Test Barcode**, and **Test Cash Drawer** send a real, minimal job
+  through `POST /print` — the same path production printing uses,
+  including a real drawer-kick for **Test Cash Drawer**. **Test A4**
+  instead sends a short text page via `POST /test-print` — a plain
+  connectivity check that doesn't require SumatraPDF or exercise PDF
+  rendering (see [Why the setup page mostly tests via POST /print, not POST /test-print](#why-the-setup-page-mostly-tests-via-post-print-not-post-test-print)
+  below). A role must be saved before it can be tested.
 
 ### Configuring the receipt printer
 
@@ -1700,9 +1742,13 @@ actual printer hardware.
 
 ### Everything else
 
-- Cash drawer endpoint (`POST /cash-drawer/open`) — `POST /test-print` can
-  send a text page to the printer feeding a drawer, but it does not send
-  the raw ESC_POS kick command that actually opens one.
+- Standalone cash drawer endpoint (`POST /cash-drawer/open`) — opening the
+  drawer outside of a `PRINT_INSTRUCTIONS` job with an `openDrawer`
+  instruction isn't implemented. The setup page's **Test Cash Drawer**
+  button does send a real drawer-kick via `POST /print` (see
+  [Why the setup page mostly tests via POST /print, not POST /test-print](#why-the-setup-page-mostly-tests-via-post-print-not-post-test-print)),
+  but that's still a `PRINT_INSTRUCTIONS` job under the hood, not a
+  standalone open-only call.
 - An endpoint to set `machineCode` at runtime (must still be edited by hand
   in `config.json`; the setup page shows it read-only for this reason).
 - Authentication/signing of requests from the web POS.

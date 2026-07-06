@@ -134,7 +134,9 @@
           <p class="field-hint">
             Currently triggered through receipt printing using the
             <code>openDrawer</code> instruction - there is no separate
-            cash-drawer print path yet.
+            cash-drawer print path yet. <strong>Test Cash Drawer</strong>
+            below sends a real drawer-kick command to this printer, not
+            just a connectivity check.
           </p>
 
           <div class="field">
@@ -154,23 +156,26 @@
     <section class="card">
       <h2>Test Printing</h2>
       <p class="field-hint">
-        Sends a short text page to the printer mapped to that role, to
-        confirm the agent can reach it. A role must be selected and saved
-        before it can be tested. This is a connectivity check, not a real
-        receipt/label render or a cash-drawer kick — those are separate,
-        not-yet-built features.
+        A role must be selected and saved before it can be tested.
+        <strong>Test Receipt / Barcode / Cash Drawer</strong> send a real,
+        minimal print job through the same path used for actual sales
+        (<code>POST /print</code>), including a real drawer-kick for
+        <strong>Test Cash Drawer</strong>. <strong>Test A4 Print</strong>
+        instead sends a short text page as a plain connectivity check —
+        it does not require SumatraPDF and does not exercise PDF
+        rendering.
       </p>
       <div class="actions">
-        <button type="button" class="btn btn-secondary test-btn" data-role="receipt">
+        <button type="button" class="btn btn-secondary test-btn" data-role="receipt" data-test-type="receipt">
           Test Receipt Print
         </button>
-        <button type="button" class="btn btn-secondary test-btn" data-role="barcode-label">
+        <button type="button" class="btn btn-secondary test-btn" data-role="barcode-label" data-test-type="barcode-label">
           Test Barcode Print
         </button>
-        <button type="button" class="btn btn-secondary test-btn" data-role="a4-invoice">
+        <button type="button" class="btn btn-secondary test-btn" data-role="a4-invoice" data-test-type="a4-invoice">
           Test A4 Print
         </button>
-        <button type="button" class="btn btn-secondary test-btn" data-role="receipt">
+        <button type="button" class="btn btn-secondary test-btn" data-role="receipt" data-test-type="cash-drawer">
           Test Cash Drawer
         </button>
       </div>

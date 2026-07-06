@@ -251,7 +251,56 @@
       });
   }
 
-  function testPrint(role) {
+  function parseMm(value, fallback) {
+    var parsed = parseFloat(value);
+    return isNaN(parsed) ? fallback : parsed;
+  }
+
+  // Builds a real, minimal POST /print payload for the given test button,
+  // using the role's actual saved mapping (commandLanguage, label size) so
+  // the test exercises the same production path a real sale would use -
+  // see "Why the setup page test buttons use POST /print" in the README.
+  function buildTestPrintRequest(testType, savedMapping) {
+    var timestamp = new Date().toISOString();
+
+    if (testType === "barcode-label") {
+      return {
+        printRole: "barcode-label",
+        commandLanguage: savedMapping.commandLanguage,
+        payloadType: "PRINT_INSTRUCTIONS",
+        copies: 1,
+        payload: {
+          labelWidthMm: parseMm(savedMapping.labelWidth, 50),
+          labelHeightMm: parseMm(savedMapping.labelHeight, 25),
+          instructions: [
+            { type: "text", x: 20, y: 20, value: "TEST LABEL" },
+            { type: "text", x: 20, y: 60, value: timestamp },
+          ],
+        },
+      };
+    }
+
+    var instructions = [
+      { type: "text", value: "PINNACLE POS PRINT AGENT", align: "center", bold: true },
+      { type: "text", value: "Test Print", align: "center" },
+      { type: "text", value: timestamp },
+    ];
+    if (testType === "cash-drawer") {
+      instructions.push({ type: "openDrawer" });
+    }
+    instructions.push({ type: "feed", lines: 3 });
+    instructions.push({ type: "cut", mode: "full" });
+
+    return {
+      printRole: "receipt",
+      commandLanguage: savedMapping.commandLanguage,
+      payloadType: "PRINT_INSTRUCTIONS",
+      copies: 1,
+      payload: { width: 42, instructions: instructions },
+    };
+  }
+
+  function testPrint(role, testType) {
     clearMessage();
 
     var roleConfig = ROLES.filter(function (r) {
@@ -270,11 +319,32 @@
       return;
     }
 
-    apiFetch("/test-print", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ role: role }),
-    })
+    // Test A4 Print stays on /test-print: it's a plain connectivity check
+    // that works without SumatraPDF, unlike a real PDF print job. Every
+    // other test button sends a real job through POST /print instead of
+    // /test-print, because /test-print always renders through the normal
+    // Windows GDI pipeline (PowerShell's Out-Printer), which some printer
+    // drivers - e.g. "Generic / Text Only" backed by a raw file port, the
+    // documented no-hardware testing setup - cannot accept and fail with
+    // "Win32 error 50: the request is not supported."
+    var request;
+    if (testType === "a4-invoice") {
+      request = apiFetch("/test-print", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role: role }),
+      });
+    } else {
+      var body = buildTestPrintRequest(testType, savedMapping);
+      body.jobId = "TEST-" + testType.toUpperCase() + "-" + Date.now();
+      request = apiFetch("/print", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+
+    request
       .then(function (result) {
         showMessage("success", "Test print sent to " + result.printerName + ".");
       })
@@ -298,7 +368,7 @@
     var testButtons = document.querySelectorAll(".test-btn");
     testButtons.forEach(function (btn) {
       btn.addEventListener("click", function () {
-        testPrint(btn.getAttribute("data-role"));
+        testPrint(btn.getAttribute("data-role"), btn.getAttribute("data-test-type"));
       });
     });
   }

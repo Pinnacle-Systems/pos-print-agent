@@ -1,6 +1,6 @@
 {
   "name": "pos-print-agent",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Local Windows POS print agent exposing a localhost HTTP API for receipt/label printing and cash drawer control.",
   "private": true,
   "main": "dist/main.js",

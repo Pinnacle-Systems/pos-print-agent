@@ -7,10 +7,14 @@
   <workingdirectory>C:\Pinnacle\PosPrintAgent</workingdirectory>
 
   <logpath>C:\ProgramData\Pinnacle\PosPrintAgent\logs</logpath>
-  <log mode="roll-by-size">
-    <sizeThreshold>10485760</sizeThreshold>
-    <keepFiles>10</keepFiles>
-  </log>
+  <!--
+    The app writes its own rotating log (agent.log, see src/logging/logger.ts)
+    with everything that would otherwise go to stdout/stderr, so WinSW's own
+    out.log/err.log capture would just be a duplicate - and its roll-by-size
+    mode rotates on every process restart regardless of file size (see
+    https://github.com/winsw/winsw/issues/894), which was shredding history.
+  -->
+  <log mode="none"/>
 
   <startmode>Automatic</startmode>
 

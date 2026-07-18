@@ -36,6 +36,42 @@ const PDF_PAYLOAD_TYPE = "PDF";
 const PDF_PRINT_ROLE: PrintRole = "a4-invoice";
 const PDF_COMMAND_LANGUAGE: CommandLanguage = "PDF";
 
+// Columns-per-line for each paper size the setup UI's "Receipt Paper Width"
+// dropdown offers (see setup-ui/index.html), at the printer's default font.
+// Falls back to the 80mm value when a mapping has no paperWidth saved yet
+// (e.g. mappings created before this setting existed).
+const PAPER_WIDTH_COLUMNS: Record<string, number> = {
+  "80mm": 48,
+  "58mm": 32,
+};
+const DEFAULT_RECEIPT_WIDTH_COLUMNS = PAPER_WIDTH_COLUMNS["80mm"];
+
+function resolveReceiptWidthColumns(paperWidth: string | undefined): number {
+  if (paperWidth && paperWidth in PAPER_WIDTH_COLUMNS) {
+    return PAPER_WIDTH_COLUMNS[paperWidth];
+  }
+  return DEFAULT_RECEIPT_WIDTH_COLUMNS;
+}
+
+/**
+ * Injects a `width` derived from the receipt printer mapping's configured
+ * paper size, but only when the caller didn't already specify one - an
+ * explicit payload.width always wins. This is what makes the setup UI's
+ * "Receipt Paper Width" (80mm/58mm) setting actually take effect instead of
+ * every receipt silently using whatever PrintInstructionsPayloadSchema's own
+ * default is.
+ */
+function withResolvedReceiptWidth(payload: unknown, mapping: PrinterMapping): unknown {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return payload;
+  }
+  const record = payload as Record<string, unknown>;
+  if (typeof record.width === "number") {
+    return payload;
+  }
+  return { ...record, width: resolveReceiptWidthColumns(mapping.paperWidth) };
+}
+
 export interface PrintJobResult {
   jobId: string;
   printRole: string;
@@ -163,17 +199,17 @@ async function processReceiptInstructionsJob(
     );
   }
 
-  assertKnownInstructionTypes(payload, KNOWN_INSTRUCTION_TYPES);
-
-  const payloadParsed = PrintInstructionsPayloadSchema.safeParse(payload);
-  if (!payloadParsed.success) {
-    throw new AppError(400, "INVALID_PRINT_PAYLOAD", formatZodIssues(payloadParsed.error.issues));
-  }
-
   const mapping = resolvePrinterMapping(printRole);
   await assertPrinterInstalled(printRole, mapping);
   logFields.printerName = mapping.windowsPrinterName;
   assertCommandLanguageMatches(printRole, mapping, commandLanguage, RECEIPT_COMMAND_LANGUAGE);
+
+  assertKnownInstructionTypes(payload, KNOWN_INSTRUCTION_TYPES);
+
+  const payloadParsed = PrintInstructionsPayloadSchema.safeParse(withResolvedReceiptWidth(payload, mapping));
+  if (!payloadParsed.success) {
+    throw new AppError(400, "INVALID_PRINT_PAYLOAD", formatZodIssues(payloadParsed.error.issues));
+  }
 
   const { buffer, instructionCount } = renderEscPosInstructions(payloadParsed.data);
   logFields.instructionCount = instructionCount;

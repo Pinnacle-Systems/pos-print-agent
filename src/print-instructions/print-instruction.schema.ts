@@ -132,7 +132,11 @@ export const PrintInstructionsPayloadSchema = z.object({
     .int()
     .min(32, "payload.width must be between 32 and 48")
     .max(48, "payload.width must be between 32 and 48")
-    .default(42),
+    // Ultimate fallback only - print-job.service.ts normally injects a width
+    // derived from the printer mapping's configured paper size (see
+    // resolveReceiptWidthColumns) before this schema ever sees the payload.
+    // 48 matches a standard 80mm thermal printer at its default font.
+    .default(48),
   instructions: z
     .array(PrintInstructionSchema)
     .min(1, "payload.instructions must be a non-empty array")

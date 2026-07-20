@@ -26,6 +26,20 @@ function renderLeftRightLine(left: string, right: string, width: number): string
   return buffer.subarray(LEFT_RIGHT_TEXT_OFFSET, lfIndex).toString("ascii");
 }
 
+// A lone "text" instruction always emits, in order: init (2 bytes), align
+// (3), bold (3), underline (3), size (3), then one or more "<line>\n"
+// bodies, then the same 12-byte reset block used by every text instruction.
+const TEXT_BODY_OFFSET = 2 + 3 + 3 + 3 + 3;
+const TEXT_RESET_BLOCK_LENGTH = 12;
+
+function renderTextLines(value: string, width: number): string[] {
+  const { buffer } = render([{ type: "text", value }], width);
+  const body = buffer.subarray(TEXT_BODY_OFFSET, buffer.length - TEXT_RESET_BLOCK_LENGTH);
+  // Trailing LF after the final line would otherwise produce an empty
+  // trailing element from split("\n").
+  return body.toString("ascii").split("\n").slice(0, -1);
+}
+
 describe("renderEscPosInstructions", () => {
   it("always starts with the ESC @ init bytes", () => {
     const { buffer } = render([{ type: "text", value: "hi" }]);
@@ -126,6 +140,58 @@ describe("renderEscPosInstructions", () => {
         0x00, // align left
       ]),
     );
+  });
+
+  describe("text instruction word-wrapping", () => {
+    it("does not wrap a value that already fits within the width", () => {
+      expect(renderTextLines("Short Item", 48)).toEqual(["Short Item"]);
+    });
+
+    it("wraps a long value onto multiple lines at word boundaries, never exceeding the width", () => {
+      const name = "Mars Collar With Pocket Ice Blue M Size(610910)";
+      const lines = renderTextLines(name, 32);
+      expect(lines.length).toBeGreaterThan(1);
+      for (const line of lines) {
+        expect(line.length).toBeLessThanOrEqual(32);
+      }
+      expect(lines.join(" ")).toBe(name);
+    });
+
+    it("hard-splits a single word longer than the width instead of overflowing", () => {
+      const name = "Supercalifragilisticexpialidocious"; // 35 chars, no spaces
+      const width = 32;
+      const lines = renderTextLines(name, width);
+      expect(lines.every((line) => line.length <= width)).toBe(true);
+      expect(lines.join("")).toBe(name);
+      expect(lines.length).toBe(2);
+    });
+
+    it("wraps identically in shape at both 32 and 48 column widths", () => {
+      const name = "Premium Cotton Formal Shirt Full Sleeve Slim Fit";
+      for (const width of [32, 48]) {
+        const lines = renderTextLines(name, width);
+        expect(lines.join(" ")).toBe(name);
+        for (const line of lines) {
+          expect(line.length).toBeLessThanOrEqual(width);
+        }
+      }
+    });
+
+    it("keeps consecutive wrapped text instructions independent of each other", () => {
+      const { buffer } = render(
+        [
+          { type: "text", value: "Extra Long First Item Name That Wraps Around", bold: true },
+          { type: "text", value: "Second Item", bold: true },
+        ],
+        32,
+      );
+      expect(buffer.toString("ascii")).toContain("Second Item");
+      // First item's wrapped lines all precede the second item's line.
+      const secondIndex = buffer.indexOf(Buffer.from("Second Item", "ascii"));
+      const firstWordIndex = buffer.indexOf(Buffer.from("Extra", "ascii"));
+      expect(firstWordIndex).toBeGreaterThanOrEqual(0);
+      expect(secondIndex).toBeGreaterThan(firstWordIndex);
+    });
   });
 
   it("reports instructionCount matching the number of instructions", () => {

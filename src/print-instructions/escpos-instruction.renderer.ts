@@ -113,14 +113,58 @@ function escPosOpenDrawer(): Buffer {
   return Buffer.from([ESC, 0x70, 0x00, 0x19, 0xfa]);
 }
 
-function renderTextInstruction(instruction: TextInstruction): Buffer {
+/**
+ * Breaks `value` into lines of at most `width` columns, wrapping on word
+ * boundaries where possible. A single word longer than `width` is hard-split
+ * rather than left to overflow (printer firmware wrap behavior for
+ * over-length lines is inconsistent across models, so this renderer must not
+ * depend on it - see the item-name-truncation fix this replaced).
+ */
+function wrapToWidth(value: string, width: number): string[] {
+  if (value.length <= width) {
+    return [value];
+  }
+
+  const lines: string[] = [];
+  let current = "";
+
+  for (const word of value.split(" ")) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (candidate.length <= width) {
+      current = candidate;
+      continue;
+    }
+
+    if (current) {
+      lines.push(current);
+      current = "";
+    }
+
+    let remaining = word;
+    while (remaining.length > width) {
+      lines.push(remaining.slice(0, width));
+      remaining = remaining.slice(width);
+    }
+    current = remaining;
+  }
+
+  if (current) {
+    lines.push(current);
+  }
+
+  return lines;
+}
+
+function renderTextInstruction(instruction: TextInstruction, width: number): Buffer {
+  const lines = wrapToWidth(toAsciiSafe(instruction.value), width);
+  const textLines = lines.map((line) => Buffer.concat([Buffer.from(line, "ascii"), Buffer.from([LF])]));
+
   return Buffer.concat([
     escPosAlign(instruction.align),
     escPosBold(instruction.bold),
     escPosUnderline(instruction.underline),
     escPosSize(instruction.size),
-    Buffer.from(toAsciiSafe(instruction.value), "ascii"),
-    Buffer.from([LF]),
+    ...textLines,
     // Reset styling after the line so it never leaks into the next
     // instruction (spec step "Reset bold/underline/size/alignment after
     // the line to avoid style leakage").
@@ -281,7 +325,7 @@ export function renderEscPosInstructions(payload: PrintInstructionsPayload): Ren
   for (const instruction of payload.instructions) {
     switch (instruction.type) {
       case "text":
-        parts.push(renderTextInstruction(instruction));
+        parts.push(renderTextInstruction(instruction, payload.width));
         break;
       case "line":
         parts.push(renderLineInstruction(instruction, payload.width));
